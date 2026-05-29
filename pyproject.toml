@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "viper-cli"
+version = "1.0.0"
+description = "Viper — we bite. A precision recon & security toolkit."
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.10"
+dependencies = [
+    "click>=8.0",
+    "rich>=13.0",
+]
+
+[project.optional-dependencies]
+full = [
+    "dnspython",
+    "python-whois",
+]
+
+[project.scripts]
+viper = "viper.cli:cli"
+
+[project.urls]
+Homepage = "https://github.com/yourusername/viper"
+Repository = "https://github.com/yourusername/viper"
+Changelog = "https://github.com/yourusername/viper/blob/main/CHANGELOG.md"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["viper*"]
