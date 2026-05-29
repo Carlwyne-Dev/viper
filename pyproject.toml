@@ -24,9 +24,9 @@ full = [
 viper = "viper.cli:cli"
 
 [project.urls]
-Homepage = "https://github.com/yourusername/viper"
-Repository = "https://github.com/yourusername/viper"
-Changelog = "https://github.com/yourusername/viper/blob/main/CHANGELOG.md"
+Homepage = "https://github.com/Carlwyne-Dev/viper"
+Repository = "https://github.com/Carlwyne-Dev/viper"
+Changelog = "https://github.com/Carlwyne-Dev/viper/blob/main/CHANGELOG.md"
 
 [tool.setuptools.packages.find]
 where = ["."]

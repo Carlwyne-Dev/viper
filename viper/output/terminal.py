@@ -299,3 +299,87 @@ def history_row(ts: str, n_findings: int, summary: dict):
         f"  [white]{n_findings:>3} findings[/white]"
         f"{crit_str}{high_str}"
     )
+
+
+# ── OSINT deep rendering ───────────────────────────────────────────────────────
+
+def osint_profile(p):
+    """Render a single platform profile — found with metadata."""
+    conf_color = "success" if p.confidence >= 85 else "warn" if p.confidence >= 60 else "dim"
+    conf_str = f"[{conf_color}]{p.confidence}%[/{conf_color}]"
+
+    console.print(f"\n  [venom]{p.platform}[/venom]  {conf_str}  [dim]{p.url}[/dim]")
+
+    if p.name:
+        console.print(f"  [dim]  name      [/dim][white]{p.name}[/white]")
+    if p.bio:
+        bio = p.bio[:80] + ("…" if len(p.bio) > 80 else "")
+        console.print(f"  [dim]  bio       [/dim][white]{bio}[/white]")
+    if p.joined:
+        console.print(f"  [dim]  joined    [/dim][white]{p.joined}[/white]")
+    if p.last_active:
+        console.print(f"  [dim]  active    [/dim][white]{p.last_active}[/white]")
+    if p.location:
+        console.print(f"  [dim]  location  [/dim][white]{p.location}[/white]")
+    if p.followers:
+        console.print(f"  [dim]  followers [/dim][white]{p.followers:,}[/white]")
+    if p.posts:
+        console.print(f"  [dim]  posts     [/dim][white]{p.posts:,}[/white]")
+
+    # Platform-specific extras
+    if p.platform == "GitHub":
+        langs = p.metadata.get("top_languages", [])
+        if langs:
+            console.print(f"  [dim]  languages [/dim][white]{', '.join(langs)}[/white]")
+        top_repos = p.metadata.get("top_repos", [])
+        if top_repos:
+            repos_str = "  ".join(f"{r['name']}({r['stars']}★)" for r in top_repos[:3])
+            console.print(f"  [dim]  top repos [/dim][white]{repos_str}[/white]")
+        if p.metadata.get("twitter"):
+            console.print(f"  [dim]  twitter   [/dim][dim]@{p.metadata['twitter']}[/dim]")
+
+    if p.platform == "HackerNews":
+        karma = p.metadata.get("karma", 0)
+        subs  = p.metadata.get("submitted", 0)
+        console.print(f"  [dim]  karma     [/dim][white]{karma:,}[/white]  [dim]·  {subs:,} submissions[/dim]")
+
+    if p.platform == "Reddit":
+        lk = p.metadata.get("link_karma", 0)
+        ck = p.metadata.get("comment_karma", 0)
+        console.print(f"  [dim]  karma     [/dim][white]{lk:,} link  ·  {ck:,} comment[/white]")
+
+    if p.platform == "Dev.to":
+        arts = p.metadata.get("articles", 0)
+        if arts:
+            console.print(f"  [dim]  articles  [/dim][white]{arts}[/white]")
+        if p.metadata.get("github"):
+            console.print(f"  [dim]  github    [/dim][dim]{p.metadata['github']}[/dim]")
+
+
+def osint_miss(p):
+    console.print(f"  [dim]✕  {p.platform:<16}  not found[/dim]")
+
+
+def osint_verdict(confidence: int, verdict: str):
+    conf_color = "crit" if confidence >= 80 else "warn" if confidence >= 50 else "dim"
+    console.print(f"\n  [dim]confidence[/dim]  [{conf_color}]{confidence}%[/{conf_color}]")
+    console.print(f"  [dim]verdict   [/dim]  [white]{verdict}[/white]")
+
+
+def osint_signals(signals: list[str]):
+    if not signals:
+        return
+    console.print(f"\n  [dim]signals:[/dim]")
+    for s in signals:
+        console.print(f"    [venom_x]◈[/venom_x]  [dim]{s}[/dim]")
+
+
+def osint_tags(tags: list[str]):
+    if not tags:
+        return
+    console.print(f"\n  [dim]interests:[/dim]  [white]{', '.join(tags)}[/white]")
+
+
+def osint_activity(hint: str):
+    if hint:
+        console.print(f"  [dim]activity: [/dim]  [white]{hint}[/white]")

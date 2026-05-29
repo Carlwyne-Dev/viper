@@ -97,8 +97,8 @@ def _ports(ports: list) -> str:
         flag = "<td><span class='flag'>▲ flagged</span></td>" if p.get('flagged') else "<td></td>"
         row = "<tr>" + f"<td class='port'>{p['port']}</td><td class='open'>OPEN</td><td class='svc'>{p.get('service','')}</td>" + flag + "</tr>"
         rows.append(row)
-    joined = "".join(rows)
     return f"<table><thead><tr><th>PORT</th><th>STATE</th><th>SERVICE</th><th></th></tr></thead><tbody>{joined}</tbody></table>"
+    return f"<table><thead><tr><th>PORT</th><th>STATE</th><th>SERVICE</th><th></th></tr></thead><tbody>{rows}</tbody></table>"
 
 
 def _vulns(vulns: list) -> str:

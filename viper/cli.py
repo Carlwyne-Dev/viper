@@ -398,18 +398,23 @@ def recon(target, whois, save, json_mode):
 @cli.command()
 @click.argument("target")
 @click.option("--email",  "-e", nargs=3, metavar="FIRST LAST DOMAIN", help="Generate email patterns.")
-@click.option("--social", "-s", is_flag=True, default=False,           help="Check social platforms.")
+@click.option("--social", "-s", is_flag=True, default=False,           help="Deep social footprint with metadata.")
 @click.option("--json",   "json_mode", is_flag=True, default=False,    help="Output as JSON.")
 def osint(target, email, social, json_mode):
-    """OSINT — email pattern generation + social media footprint.
+    """OSINT — email pattern generation + deep social footprint.
+
+    \b
+    --social runs deep extraction: metadata, confidence scoring,
+    cross-platform correlation, interest tags, activity hints.
 
     \b
     Examples:
       viper osint johndoe --social
       viper osint t --email john doe company.com
-      viper osint johndoe --social --json | jq .social
+      viper osint johndoe --social --json
     """
     import json as jsonlib
+    from dataclasses import asdict
     from viper.modules.osint import email_guesses, social as check_social
     from viper.core import jsonout
 
@@ -433,20 +438,58 @@ def osint(target, email, social, json_mode):
         data["emails"] = guesses
 
     if social:
-        out.tag("scan", f"Checking platforms for [cyan]{target}[/cyan]")
+        out.tag("scan", f"Deep OSINT on [cyan]{target}[/cyan]")
+        out.tag("info", "Extracting metadata from APIs...")
         out.blank()
+
         with out.Timer() as t:
-            with out.console.status("  [dim]checking...[/dim]", spinner="dots"):
-                results = check_social(target)
-        hits = [r for r in results if r.found]
-        for r in [x for x in results if x.found]:
-            out.social_hit(r.platform, r.url)
+            with out.console.status("  [dim]gathering intelligence...[/dim]", spinner="dots"):
+                result = check_social(target)
+
+        # Found profiles with full metadata
+        for p in result.found_profiles:
+            out.osint_profile(p)
+
+        # Missed profiles
         out.blank()
-        for r in [x for x in results if not x.found]:
-            out.social_miss(r.platform)
-        out.summary(len(hits), "profiles found", t.seconds)
+        for p in [x for x in result.profiles if not x.found]:
+            out.osint_miss(p)
+
+        # Intelligence summary
         out.blank()
-        data["social"] = [{"platform": r.platform, "url": r.url, "found": r.found} for r in results]
+        out.rule("INTELLIGENCE")
+        out.blank()
+        out.osint_verdict(result.confidence, result.verdict)
+        out.osint_signals(result.signals)
+        out.osint_tags(result.interest_tags)
+        out.osint_activity(result.activity_hint)
+        out.summary(result.found_count, "profiles found", t.seconds)
+        out.blank()
+
+        data["social"] = {
+            "found":         result.found_count,
+            "confidence":    result.confidence,
+            "verdict":       result.verdict,
+            "signals":       result.signals,
+            "interest_tags": result.interest_tags,
+            "activity":      result.activity_hint,
+            "profiles": [
+                {
+                    "platform":   p.platform,
+                    "url":        p.url,
+                    "found":      p.found,
+                    "confidence": p.confidence,
+                    "name":       p.name,
+                    "bio":        p.bio,
+                    "joined":     p.joined,
+                    "last_active":p.last_active,
+                    "followers":  p.followers,
+                    "location":   p.location,
+                    "metadata":   p.metadata,
+                }
+                for p in result.profiles
+            ],
+        }
 
     if not email and not social:
         out.warn("Specify --email FIRST LAST DOMAIN or --social")
