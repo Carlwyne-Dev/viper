@@ -25,8 +25,15 @@ jobs:
       - name: Install Viper
         run: pip install -e ".[full]"
 
-      - name: Run logic tests
+      - name: Run logic tests (Linux/macOS)
+        if: runner.os != 'Windows'
         run: PYTHONPATH=. python tests/test_core.py
+
+      - name: Run logic tests (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          $env:PYTHONPATH = "."
+          python tests/test_core.py
 
       - name: Verify CLI entry point
         run: viper --version
