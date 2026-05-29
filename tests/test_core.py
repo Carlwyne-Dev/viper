@@ -3,7 +3,8 @@ tests/test_core.py — Core logic tests. No network. No rich.
 Run: python tests/test_core.py
 """
 
-import sys, hashlib, json, tempfile, pathlib, traceback
+import sys, io, hashlib, json, tempfile, pathlib, traceback
+sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
 
 PASS = 0
 FAIL = 0
