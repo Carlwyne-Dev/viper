@@ -33,6 +33,7 @@ jobs:
         if: runner.os == 'Windows'
         run: |
           $env:PYTHONPATH = "."
+          $env:PYTHONUTF8 = "1"
           python tests/test_core.py
 
       - name: Verify CLI entry point
