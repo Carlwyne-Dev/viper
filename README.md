@@ -49,6 +49,22 @@ pip install -e ".[full]"
 
 ---
 
+## Docker
+
+Run Viper in a container — no dependency hell, guaranteed to work on any system:
+
+```bash
+# Build the image
+docker build -t viper:latest .
+
+# Run Viper
+docker run -it viper:latest
+```
+
+Works identically on Windows, Mac, and Linux. No Python version conflicts, no missing dependencies.
+
+---
+
 ## Fangs
 
 | Command | What it does |
