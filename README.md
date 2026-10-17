@@ -39,11 +39,11 @@ Viper is **recon-first**. It does less than most tools and does it better.
 ## Install
 
 ```bash
-git clone https://github.com/yourusername/viper.git
+git clone https://github.com/Carlwyne-Dev/viper.git
 cd viper
 pip install -e .
 
-# Optional: richer DNS + WHOIS support
+# Optional: WHOIS support
 pip install -e ".[full]"
 ```
 
@@ -69,17 +69,21 @@ Works identically on Windows, Mac, and Linux. No Python version conflicts, no mi
 
 | Command | What it does |
 |---------|-------------|
-| `viper bite target.com` | Fast recon: scan + DNS + subs + vuln hints |
+| `viper bite target.com` | Fast recon: scan + DNS + subs (incl. crt.sh) + vuln hints |
 | `viper bite target.com --all` | + Web Fang: tech stack, paths, SSL, headers |
-| `viper venom target.com` | Full assault, auto-saves HTML + JSON report |
-| `viper web target.com` | Web fingerprint, sensitive paths, SSL audit |
-| `viper fang target.com` | Focused port scan |
+| `viper bite target.com --passive` | Passive only — sends nothing to the target |
+| `viper venom target.com` | Full assault (+ takeover + Shodan), saves HTML + JSON |
+| `viper web target.com` | Web fingerprint, sensitive paths, deep TLS audit |
+| `viper fang target.com` | Focused port scan — host, CIDR, range, or `-iL` file |
 | `viper recon target.com` | DNS records + subdomain enumeration |
+| `viper passive target.com` | crt.sh subdomains + subdomain-takeover check |
+| `viper intel target.com` | Passive Shodan lookup (ports, banners, known CVEs) |
+| `viper cve <query>` | Search the live NVD CVE database |
 | `viper osint johndoe --social` | Social media footprint |
 | `viper crack <hash>` | Identify + crack password hashes |
 | `viper diff target.com` | Compare last two scans — what changed? |
 | `viper history target.com` | Full scan history |
-| `viper report scan.json` | Generate HTML report |
+| `viper report scan.json -f sarif` | Export HTML / JSON / CSV / Markdown / SARIF |
 
 ---
 
@@ -142,6 +146,7 @@ viper diff google.com
 ```bash
 viper bite google.com
 viper bite google.com --all          # includes web analysis
+viper bite google.com --passive      # zero packets to the target (crt.sh + DNS)
 viper bite google.com --save out.json
 viper bite google.com --silent --json | jq .ports
 ```
@@ -162,13 +167,22 @@ viper web google.com --save web.json
 ```bash
 viper fang 10.0.0.1
 viper fang 10.0.0.1 -p 1-65535
-viper fang 10.0.0.1 -p 22,80,443 --threads 300
+viper fang 10.0.0.0/24 -p 22,80,443          # whole CIDR block
+viper fang 10.0.0.1-50 --threads 300         # dash range
+viper fang -iL targets.txt -p 1-1024         # targets from a file
 ```
 
 ### DNS + subdomains
 ```bash
 viper recon google.com
 viper recon google.com --whois
+```
+
+### Passive recon (zero packets to the target)
+```bash
+viper passive google.com                     # crt.sh subdomains + takeover check
+viper passive google.com --no-takeover       # discovery only
+viper intel 1.1.1.1                           # Shodan lookup (needs a key — see Config)
 ```
 
 ### OSINT
@@ -196,7 +210,10 @@ viper targets                    # all tracked targets
 ### Reports
 ```bash
 viper bite google.com --save scan.json
-viper report scan.json -o report.html
+viper report scan.json -o report.html                 # HTML (default)
+viper report scan.json -o findings.csv  --format csv  # spreadsheet
+viper report scan.json -o report.md     --format md   # Markdown
+viper report scan.json -o viper.sarif   --format sarif # CI / code-scanning
 ```
 
 ### Config
@@ -206,7 +223,26 @@ viper config --init
 viper config --set scan.threads 200
 viper config --set scan.timeout 0.3
 viper config --set scan.ports 1-65535
+viper config --set integrations.shodan_key <KEY>      # enables passive Shodan intel
 ```
+
+Shodan/NVD keys may also come from the environment (these win over the config
+file): `VIPER_SHODAN_KEY`, `VIPER_NVD_KEY`.
+
+### Authorization scope guard
+Create an allowlist at `~/.viper/scope.txt` — one entry per line (exact host,
+`*.wildcard`, CIDR, or IP; `#` comments allowed). Once it exists, Viper refuses
+**active** scans against anything not listed:
+
+```bash
+# ~/.viper/scope.txt
+example.com
+*.example.com
+10.0.0.0/24
+```
+
+Out-of-scope targets are blocked unless you run `--passive` (sends nothing to
+the target) or override with `--force`.
 
 ---
 
@@ -221,6 +257,9 @@ viper/
 │   ├── diff.py         # Comparison engine
 │   ├── latency.py      # Network-aware timeout tuning
 │   ├── config.py       # Typed config (~/.viper/config.json)
+│   ├── cvedb.py        # Live NVD lookups + CPE matching
+│   ├── targets.py      # CIDR / range / -iL target expansion
+│   ├── scope.py        # Authorization scope guard
 │   └── errors.py       # Graceful failures, no tracebacks
 ├── bite/
 │   ├── quick.py        # viper bite — fast default flow
@@ -228,13 +267,15 @@ viper/
 ├── modules/            # Raw capability. No rendering.
 │   ├── scanner.py      # Threaded port scanner
 │   ├── recon.py        # DNS + concurrent subdomain enum
+│   ├── passive.py      # crt.sh enum + subdomain takeover
+│   ├── intel.py        # Shodan passive intelligence
 │   ├── vuln.py         # Banner grab + CVE signatures
-│   ├── web.py          # Web fingerprint + path check
+│   ├── web.py          # Web fingerprint + deep TLS audit
 │   ├── osint.py        # Email + social footprint
 │   └── crack.py        # Hash ID + wordlist crack
 └── output/
     ├── terminal.py     # All rendering. One place.
-    └── report.py       # HTML + JSON export
+    └── report.py       # HTML / JSON / CSV / Markdown / SARIF export
 ```
 
 **The key rule:** `modules/` never prints anything. `output/terminal.py` owns every line that hits the screen. Change the design, change one file.
@@ -264,7 +305,9 @@ viper diff target.com
 - Python 3.10+
 - `click>=8.0`
 - `rich>=13.0`
-- Optional: `dnspython`, `python-whois`
+- `textual>=0.50.0`
+- `dnspython>=2.0` (DNS records + CNAME resolution)
+- Optional: `python-whois` (`pip install -e ".[full]"`)
 
 ---
 
