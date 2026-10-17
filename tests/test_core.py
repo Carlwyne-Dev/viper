@@ -52,6 +52,62 @@ except Exception as e:
     fail("crack module", str(e))
     traceback.print_exc()
 
+# ── crack: mutation engine, NTLM, salted ─────────────────────────────────────────
+print("\n  CRACK+")
+try:
+    from viper.modules.crack import (mutate, crack, identify, hash_word,
+                                     _md4_pure)
+    import hashlib as _hl
+
+    # Mutation engine produces realistic variants.
+    variants = set(mutate("summer"))
+    for expect in ("summer", "Summer", "summer1", "summer!", "Summer2024"):
+        assert expect in variants, f"missing {expect}"
+    ok(f"mutate: case/affix/year variants ({len(variants)} for 'summer')")
+
+    cap = list(mutate("x", max_variants=10))
+    assert len(cap) == 10
+    ok("mutate: max_variants cap honored")
+
+    # A base word only crackable via a rule (not verbatim).
+    target = _hl.md5(b"Summer2024").hexdigest()
+    r = crack(target)                      # 'summer' is in BUILTIN; rule finds Summer2024
+    assert r.cracked == "Summer2024", r.cracked
+    ok("crack: rule-mutated hit (Summer2024)")
+    assert crack(target, use_rules=False).cracked is None
+    ok("crack: --no-rules misses the mutation")
+
+    # NTLM — known vector + pure MD4 fallback correctness.
+    assert hash_word("password", "ntlm") == "8846f7eaee8fb117ad06bdd830b7586c"
+    ok("ntlm: known vector for 'password'")
+    assert _md4_pure(b"") == "31d6cfe0d16ae931b73c59d7e0c089c0"
+    assert _md4_pure(b"abc") == "a448017aaf21d8525fc10ae87aa6729d"
+    ok("md4 pure fallback: RFC test vectors")
+    rn = crack("8846f7eaee8fb117ad06bdd830b7586c")
+    assert rn.cracked == "password" and rn.algo_used == "NTLM"
+    assert "NTLM" in identify("8846f7eaee8fb117ad06bdd830b7586c")
+    ok("crack: NTLM digest → password")
+
+    # Salted MD5 (hash:salt), both orderings.
+    salt = "aabbcc"
+    dig = _hl.md5(b"monkey" + salt.encode()).hexdigest()
+    rs = crack(f"{dig}:{salt}")
+    assert rs.cracked == "monkey" and rs.salted
+    assert identify(f"{dig}:{salt}") == ["MD5+salt", "NTLM+salt"]
+    ok("crack: salted MD5 (word+salt)")
+
+    dig2 = _hl.md5(salt.encode() + b"dragon").hexdigest()
+    assert crack(f"{dig2}:{salt}").cracked == "dragon"
+    ok("crack: salted MD5 (salt+word)")
+
+    # bcrypt identified but flagged as needing external tooling.
+    rb = crack("$2a$12$abcdefghijklmnopqrstuv")
+    assert rb.cracked is None and "john/hashcat" in rb.note
+    ok("crack: bcrypt → external-tool note")
+except Exception as e:
+    fail("crack+", str(e))
+    traceback.print_exc()
+
 # ── models ─────────────────────────────────────────────────────────────────────
 print("\n  MODELS")
 try:
@@ -461,6 +517,39 @@ try:
     ok("check: enforced in/out + missing file")
 except Exception as e:
     fail("scope", str(e))
+    traceback.print_exc()
+
+# ── recon wildcard guard ─────────────────────────────────────────────────────────
+print("\n  RECON")
+try:
+    from viper.modules.recon import _filter_wildcard, SubResult
+
+    subs = [SubResult("a.example.com", "1.2.3.4"),
+            SubResult("b.example.com", "9.9.9.9"),   # wildcard IP
+            SubResult("c.example.com", "9.9.9.9")]   # wildcard IP
+    kept = _filter_wildcard(subs, {"9.9.9.9"})
+    assert [s.subdomain for s in kept] == ["a.example.com"]
+    ok("recon: wildcard IPs filtered out")
+
+    # No wildcard detected → nothing dropped.
+    assert _filter_wildcard(subs, set()) == subs
+    ok("recon: no wildcard → passthrough")
+except Exception as e:
+    fail("recon", str(e))
+    traceback.print_exc()
+
+# ── vuln TLS-aware banner grab ─────────────────────────────────────────────────────
+print("\n  VULN-GRAB")
+try:
+    from viper.modules import vuln as _v
+    assert _v.TLS_PORTS == {443, 8443} and 80 in _v.HTTP_PORTS
+    # The grabber must special-case TLS ports (source-level guarantee).
+    import inspect
+    src = inspect.getsource(_v._grab)
+    assert "wrap_socket" in src and "TLS_PORTS" in src
+    ok("vuln: _grab wraps TLS ports before HTTP send")
+except Exception as e:
+    fail("vuln-grab", str(e))
     traceback.print_exc()
 
 # ── result ─────────────────────────────────────────────────────────────────────

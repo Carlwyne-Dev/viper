@@ -92,14 +92,40 @@ def _probe_sub(domain: str, word: str) -> SubResult | None:
         return None
 
 
+def _wildcard_ips(domain: str, probes: int = 2) -> set[str]:
+    """
+    Detect wildcard DNS: resolve random, certainly-nonexistent labels. Any IP
+    they return is a wildcard answer and must not be treated as a real host.
+    """
+    import random
+    ips: set[str] = set()
+    for _ in range(probes):
+        label = "".join(random.choice("abcdefghijklmnopqrstuvwxyz0123456789")
+                         for _ in range(16))
+        try:
+            ips.add(socket.gethostbyname(f"{label}.{domain}"))
+        except socket.gaierror:
+            pass
+    return ips
+
+
+def _filter_wildcard(results: list[SubResult], wildcard_ips: set[str]) -> list[SubResult]:
+    """Drop results that only resolve to a wildcard IP. Pure, testable."""
+    if not wildcard_ips:
+        return results
+    return [r for r in results if r.ip not in wildcard_ips]
+
+
 def subdomains(domain: str, wordlist: list[str] | None = None, threads: int = 50) -> list[SubResult]:
-    """Concurrent subdomain enumeration — significantly faster than sequential."""
+    """Concurrent subdomain enumeration with wildcard-DNS filtering."""
     words  = wordlist or SUBDOMAIN_WORDLIST
     found  = []
+    wildcard = _wildcard_ips(domain)
     with concurrent.futures.ThreadPoolExecutor(max_workers=threads) as ex:
         futures = {ex.submit(_probe_sub, domain, word): word for word in words}
         for f in concurrent.futures.as_completed(futures):
             result = f.result()
             if result:
                 found.append(result)
+    found = _filter_wildcard(found, wildcard)
     return sorted(found, key=lambda r: r.subdomain)

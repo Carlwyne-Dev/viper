@@ -704,20 +704,24 @@ def osint(target, email, social, json_mode):
 @click.argument("hash_input")
 @click.option("--wordlist", "-w", default=None, metavar="FILE", help="Wordlist path.")
 @click.option("--identify", "-i", is_flag=True, default=False,  help="Identify only, don't crack.")
+@click.option("--no-rules", "no_rules", is_flag=True, default=False, help="Disable the mutation engine (exact words only).")
 @click.option("--json", "json_mode", is_flag=True, default=False, help="Output as JSON.")
-def crack(hash_input, wordlist, identify, json_mode):
+def crack(hash_input, wordlist, identify, no_rules, json_mode):
     """Identify hash type and crack with a wordlist.
 
     \b
-    Supports: MD5, SHA1, SHA256, SHA384, SHA512.
-    Built-in wordlist included. Supply rockyou.txt for real cracking.
+    Supports: MD5, NTLM, SHA1/224/256/384/512, and salted MD5/SHA (hash:salt).
+    A mutation engine (case, leet, digit/year/symbol affixes) expands each
+    wordlist entry into many realistic variants; --no-rules disables it.
+    Built-in seed list included. Supply rockyou.txt for real cracking.
 
     \b
     Examples:
       viper crack 5f4dcc3b5aa765d61d8327deb882cf99
       viper crack <hash> -w /usr/share/wordlists/rockyou.txt
+      viper crack <md5hash>:<salt>
+      viper crack <hash> --no-rules
       viper crack <hash> --identify
-      viper crack <hash> --json
     """
     from viper.modules.crack import crack as do_crack, identify as do_id
     from viper.core import jsonout
@@ -743,11 +747,15 @@ def crack(hash_input, wordlist, identify, json_mode):
 
     with out.Timer() as t:
         with out.console.status("  [dim]cracking...[/dim]", spinner="dots"):
-            result = do_crack(hash_input, wordlist_path=wordlist)
+            result = do_crack(hash_input, wordlist_path=wordlist,
+                              use_rules=not no_rules)
 
-    out.tag("info", f"Wordlist  [dim]{result.wordlist_src}[/dim]")
+    out.tag("info", f"Wordlist  [dim]{result.wordlist_src}"
+                    f"{' · rules on' if not no_rules else ' · rules off'}[/dim]")
     out.blank()
     out.hash_type(result.hash_types)
+    if result.note:
+        out.warn(result.note)
     if result.cracked:
         out.cracked(result.cracked, result.algo_used or "", result.words_tried)
     else:
@@ -756,7 +764,9 @@ def crack(hash_input, wordlist, identify, json_mode):
 
     if json_mode:
         jsonout.merge({"hash": hash_input, "types": result.hash_types,
-                       "cracked": result.cracked, "algo": result.algo_used})
+                       "cracked": result.cracked, "algo": result.algo_used,
+                       "salted": result.salted, "words_tried": result.words_tried,
+                       "note": result.note})
         jsonout.flush()
 
     out.set_silent(False)

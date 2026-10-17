@@ -4,10 +4,14 @@ No rendering. Returns structured data only.
 """
 
 import socket
+import ssl
 import re
 import urllib.request
 import concurrent.futures
 from dataclasses import dataclass
+
+TLS_PORTS = {443, 8443}
+HTTP_PORTS = {80, 8080}
 
 SIGNATURES = [
     # (pattern, service, CVE, severity, description)
@@ -63,12 +67,24 @@ class HeaderResult:
 
 
 def _grab(host: str, port: int, timeout: float) -> str | None:
+    req = b"HEAD / HTTP/1.0\r\nHost: " + host.encode() + b"\r\n\r\n"
     try:
+        if port in TLS_PORTS:
+            # TLS ports speak TLS first — a plaintext HTTP send gets no reply.
+            # Wrap the socket so the HEAD request actually reaches the server.
+            ctx = ssl.create_default_context()
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+            with socket.create_connection((host, port), timeout=timeout) as raw:
+                with ctx.wrap_socket(raw, server_hostname=host) as s:
+                    s.settimeout(timeout)
+                    s.send(req)
+                    return s.recv(2048).decode(errors="ignore").strip()
         with socket.create_connection((host, port), timeout=timeout) as s:
             s.settimeout(timeout)
-            if port in (80, 8080, 443, 8443):
-                s.send(b"HEAD / HTTP/1.0\r\nHost: " + host.encode() + b"\r\n\r\n")
-            return s.recv(1024).decode(errors="ignore").strip()
+            if port in HTTP_PORTS:
+                s.send(req)
+            return s.recv(2048).decode(errors="ignore").strip()
     except Exception:
         return None
 
