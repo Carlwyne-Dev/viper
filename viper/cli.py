@@ -21,8 +21,10 @@ def cli():
       bite    target.com --all      + web fingerprint (auto-saves history)
       venom   target.com            full assault → HTML + JSON report
       web     target.com            tech stack, paths, SSL, headers
-      fang    target.com            port scan only
+      fang    target.com            port scan (host, CIDR, -iL file)
       recon   target.com            dns + subdomains
+      passive target.com            crt.sh subs + takeover (zero packets)
+      intel   target.com            shodan passive lookup
       osint   target --social       social media footprint
       osint   t --email F L domain  email pattern generation
       crack   <hash>                identify + wordlist crack
@@ -38,8 +40,11 @@ def cli():
     \b
     EXAMPLES
       viper bite google.com
+      viper bite google.com --passive
       viper bite google.com --all --save scan.json
-      viper bite google.com --silent --json
+      viper passive google.com
+      viper fang 10.0.0.0/24 -p 22,80,443
+      viper report scan.json -o out.sarif --format sarif
       viper venom google.com --out ./reports
       viper web google.com
       viper fang 10.0.0.1 -p 1-65535 --threads 300
@@ -59,25 +64,33 @@ def cli():
 @click.option("--save",   "-s", default=None, metavar="FILE",  help="Save results as JSON file.")
 @click.option("--silent", is_flag=True, default=False,          help="Suppress output except findings.")
 @click.option("--json",   "json_mode", is_flag=True, default=False, help="Output results as JSON (for piping).")
-def bite(target, all_fangs, save, silent, json_mode):
+@click.option("--passive", is_flag=True, default=False, help="Passive only — send nothing to the target.")
+@click.option("--force",   is_flag=True, default=False, help="Scan even if target is outside your scope file.")
+def bite(target, all_fangs, save, silent, json_mode, passive, force):
     """Fast recon — scan + DNS + subdomains + vuln hints.
 
     \b
     The default move. No flags needed.
     Auto-tunes scan timeout based on measured latency.
     --all adds Web Fang: tech stack, paths, SSL, headers.
+    --passive skips all active probing (crt.sh + DNS only).
     --json prints machine-readable JSON (suppresses terminal output).
     --silent suppresses all output except findings and errors.
+
+    \b
+    Scope: if ~/.viper/scope.txt exists, active scans are refused for
+    targets not listed there unless --force (or --passive) is given.
 
     \b
     Examples:
       viper bite google.com
       viper bite google.com --all
+      viper bite google.com --passive
       viper bite google.com --all --save scan.json
-      viper bite google.com --silent --json | jq .ports
     """
     from viper.bite.quick import run
-    run(target, save=save, silent=silent, all_fangs=all_fangs, json_mode=json_mode)
+    run(target, save=save, silent=silent, all_fangs=all_fangs,
+        json_mode=json_mode, passive=passive, force=force)
 
 
 # ── viper venom ───────────────────────────────────────────────────────────────
@@ -232,30 +245,35 @@ def web(target, timeout, no_paths, no_ssl, save, json_mode):
 # ── viper fang ────────────────────────────────────────────────────────────────
 
 @cli.command()
-@click.argument("target")
+@click.argument("target", required=False)
+@click.option("--targets-file", "-iL", "targets_file", default=None, metavar="FILE",
+              help="Read targets (one spec per line) from a file.")
 @click.option("--ports",   "-p", default=None,  metavar="RANGE",    help="Port range. Default: from config.")
 @click.option("--timeout", "-t", default=None,  type=float,          help="Timeout per port. Default: auto.")
 @click.option("--threads",       default=None,  type=int,            help="Thread count. Default: from config.")
 @click.option("--save",    "-s", default=None,  metavar="FILE",      help="Save results as JSON.")
 @click.option("--silent",        is_flag=True,  default=False,       help="No output except results.")
 @click.option("--json",   "json_mode", is_flag=True, default=False,  help="Output as JSON.")
-def fang(target, ports, timeout, threads, save, silent, json_mode):
+def fang(target, targets_file, ports, timeout, threads, save, silent, json_mode):
     """Focused port scan — fast, precise, configurable.
 
     \b
+    TARGET may be a host, a comma list, a CIDR block (10.0.0.0/24) or a
+    dash range (10.0.0.1-20). Use -iL to read many targets from a file.
     Auto-tunes timeout based on target latency unless --timeout is set.
 
     \b
     Examples:
       viper fang 10.0.0.1
-      viper fang 10.0.0.1 -p 1-65535
-      viper fang 10.0.0.1 -p 22,80,443,3306 --threads 200
+      viper fang 10.0.0.0/28 -p 22,80,443
+      viper fang -iL targets.txt -p 1-1024
       viper fang 10.0.0.1 --json | jq .ports
     """
     import json as jsonlib
     from viper.core import errors, jsonout
     from viper.core.config import load as cfg
     from viper.core.latency import tune_timeout
+    from viper.core import targets as tgt
     from viper.modules.scanner import scan, parse_ports
     from pathlib import Path
 
@@ -263,40 +281,68 @@ def fang(target, ports, timeout, threads, save, silent, json_mode):
         jsonout.enable()
         out.set_silent(True)
 
+    # Build the host list from the argument and/or the -iL file.
+    hosts: list[str] = []
+    if target:
+        hosts += tgt.expand(target)
+    if targets_file:
+        try:
+            hosts += tgt.from_file(targets_file)
+        except Exception as e:
+            out.error(f"Could not read targets file: {e}"); return
+    # dedupe, preserve order
+    seen, ordered = set(), []
+    for h in hosts:
+        if h not in seen:
+            seen.add(h); ordered.append(h)
+    hosts = ordered
+
+    if not hosts:
+        out.error("No target given. Pass a host/CIDR or use -iL <file>."); return
+
     c = cfg().scan
     port_str  = ports or c.ports
     port_list = parse_ports(port_str)
 
-    out.rule("PORT FANG", target)
-    out.tag("scan", f"[dim]{port_str}[/dim] — [dim]{len(port_list)} ports[/dim]")
-    out.blank()
-
-    try:
-        ip = errors.resolve(target)
-    except errors.ResolveError as e:
-        errors.handle(e); return
-
-    auto_timeout = timeout or tune_timeout(ip)
-    if not timeout:
-        out.tag("info", f"Timeout auto-tuned → [white]{auto_timeout:.2f}s[/white]")
+    if len(hosts) > 1:
+        out.tag("viper", f"Scanning [cyan]{len(hosts)}[/cyan] hosts · "
+                         f"[dim]{port_str} ({len(port_list)} ports)[/dim]")
         out.blank()
 
-    with out.Timer() as t:
-        if not silent and not json_mode:
-            with out.scan_progress(len(port_list)) as progress:
-                task = progress.add_task("scanning", total=len(port_list))
-                results = scan(ip, port_str, auto_timeout, threads or c.threads,
-                               on_progress=lambda: progress.advance(task))
-        else:
-            results = scan(ip, port_str, auto_timeout, threads or c.threads)
+    all_data = []
+    for host in hosts:
+        out.rule("PORT FANG", host)
+        out.tag("scan", f"[dim]{port_str}[/dim] — [dim]{len(port_list)} ports[/dim]")
+        out.blank()
 
-    out.ports_table(results)
-    flagged = sum(1 for p in results if p.flagged)
-    out.summary(len(results), "open ports", t.seconds, flagged)
-    out.blank()
+        try:
+            ip = errors.resolve(host)
+        except errors.ResolveError as e:
+            errors.handle(e); out.blank(); continue
 
-    data = {"target": target, "ip": ip,
-            "ports": [{"port": p.port, "service": p.service, "flagged": p.flagged} for p in results]}
+        auto_timeout = timeout or tune_timeout(ip)
+        if not timeout:
+            out.tag("info", f"Timeout auto-tuned → [white]{auto_timeout:.2f}s[/white]")
+            out.blank()
+
+        with out.Timer() as t:
+            if not silent and not json_mode:
+                with out.scan_progress(len(port_list)) as progress:
+                    task = progress.add_task("scanning", total=len(port_list))
+                    results = scan(ip, port_str, auto_timeout, threads or c.threads,
+                                   on_progress=lambda: progress.advance(task))
+            else:
+                results = scan(ip, port_str, auto_timeout, threads or c.threads)
+
+        out.ports_table(results)
+        flagged = sum(1 for p in results if p.flagged)
+        out.summary(len(results), "open ports", t.seconds, flagged)
+        out.blank()
+
+        all_data.append({"target": host, "ip": ip,
+            "ports": [{"port": p.port, "service": p.service, "flagged": p.flagged} for p in results]})
+
+    data = all_data[0] if len(all_data) == 1 else {"hosts": all_data}
 
     if save:
         Path(save).write_text(jsonlib.dumps(data, indent=2), encoding="utf-8")
@@ -339,6 +385,9 @@ def recon(target, whois, save, json_mode):
 
     out.rule("DNS FANG", target)
     out.tag("scan", "Resolving DNS records...")
+    if not r.HAS_DNSPYTHON:
+        out.warn("dnspython not installed — only A/AAAA records available "
+                 "(pip install dnspython).")
     out.blank()
 
     with out.Timer() as t:
@@ -385,6 +434,153 @@ def recon(target, whois, save, json_mode):
         Path(save).write_text(jsonlib.dumps(data, indent=2, default=str), encoding="utf-8")
         out.saved(save)
 
+    if json_mode:
+        jsonout.merge(data)
+        jsonout.flush()
+
+    out.set_silent(False)
+    jsonout.disable()
+
+
+# ── viper passive ───────────────────────────────────────────────────────────────
+
+@cli.command()
+@click.argument("target")
+@click.option("--takeover/--no-takeover", default=True, show_default=True,
+              help="Check discovered subdomains for dangling takeovers.")
+@click.option("--save", "-s", default=None, metavar="FILE", help="Save as JSON.")
+@click.option("--json", "json_mode", is_flag=True, default=False, help="Output as JSON.")
+def passive(target, takeover, save, json_mode):
+    """Passive recon — certificate transparency + subdomain takeover.
+
+    Sends nothing to the target itself. Pulls subdomains from crt.sh and
+    (optionally) checks each for a dangling third-party takeover.
+
+    \b
+    Examples:
+      viper passive example.com
+      viper passive example.com --no-takeover
+      viper passive example.com --json | jq .takeovers
+    """
+    import json as jsonlib
+    from dataclasses import asdict
+    from pathlib import Path
+    from viper.modules import passive as p
+    from viper.core import jsonout
+
+    if json_mode:
+        jsonout.enable()
+        out.set_silent(True)
+
+    out.rule("PASSIVE FANG", target)
+    out.tag("scan", "Querying certificate transparency (crt.sh)...")
+    out.blank()
+
+    with out.Timer() as t:
+        subs = p.crtsh_subdomains(target)
+    for s in subs:
+        out.tag("found", f"[target]{s.subdomain}[/target]  [dim]{s.source}[/dim]")
+    if not subs:
+        out.tag("info", "No certificate-transparency records found.")
+    out.summary(len(subs), "subdomains (passive)", t.seconds)
+
+    takeovers = []
+    if takeover and subs:
+        out.blank()
+        out.rule("TAKEOVER FANG", target)
+        out.tag("scan", f"Checking {len(subs)} names for dangling takeovers...")
+        out.blank()
+        with out.Timer() as t:
+            with out.console.status("  [dim]probing...[/dim]", spinner="dots"):
+                takeovers = p.check_takeovers([s.subdomain for s in subs])
+        for tk in takeovers:
+            out.finding("HIGH", f"Takeover: {tk.subdomain}",
+                        f"{tk.service} — {tk.confidence}% confidence")
+        if not takeovers:
+            out.tag("info", "No takeover candidates found.")
+        out.summary(len(takeovers), "takeover candidates", t.seconds, flagged=len(takeovers))
+
+    out.blank()
+    data = {
+        "target": target,
+        "passive_subs": [asdict(s) for s in subs],
+        "takeovers":    [asdict(tk) for tk in takeovers],
+    }
+
+    if save:
+        Path(save).write_text(jsonlib.dumps(data, indent=2, default=str), encoding="utf-8")
+        out.saved(save)
+
+    if json_mode:
+        jsonout.merge(data)
+        jsonout.flush()
+
+    out.set_silent(False)
+    jsonout.disable()
+
+
+# ── viper intel ───────────────────────────────────────────────────────────────
+
+@cli.command()
+@click.argument("target")
+@click.option("--save", "-s", default=None, metavar="FILE", help="Save as JSON.")
+@click.option("--json", "json_mode", is_flag=True, default=False, help="Output as JSON.")
+def intel(target, save, json_mode):
+    """Passive intel via Shodan — ports, banners and known vulns, zero packets.
+
+    Needs a Shodan key: `viper config --set integrations.shodan_key <KEY>`
+    or set VIPER_SHODAN_KEY in the environment.
+
+    \b
+    Examples:
+      viper intel 1.1.1.1
+      viper intel example.com --json
+    """
+    import json as jsonlib
+    from dataclasses import asdict
+    from pathlib import Path
+    from viper.modules import intel as it
+    from viper.core import jsonout, errors
+    from viper.core.config import load as load_config
+
+    if json_mode:
+        jsonout.enable()
+        out.set_silent(True)
+
+    cfg = load_config()
+    out.rule("INTEL FANG", target)
+
+    try:
+        ip = errors.resolve(target)
+    except errors.ResolveError as e:
+        errors.handle(e); return
+
+    out.tag("scan", f"Querying Shodan for [target]{ip}[/target]...")
+    out.blank()
+
+    with out.Timer() as t:
+        res = it.shodan_host(ip, cfg)
+
+    if not res.available:
+        out.warn(f"No passive data — {res.error}")
+    else:
+        if res.org:       out.tag("info", f"Org    [white]{res.org}[/white]")
+        if res.os:        out.tag("info", f"OS     [white]{res.os}[/white]")
+        if res.hostnames: out.tag("info", f"Hosts  [dim]{', '.join(res.hostnames[:5])}[/dim]")
+        out.blank()
+        for s in res.services:
+            label = f"{s.product} {s.version}".strip()
+            out.tag("found", f"[target]{s.port}/{s.transport}[/target]  [dim]{label}[/dim]")
+        for cve in res.vulns:
+            out.finding("MED", cve, f"{res.source} flags host affected — verify")
+        out.summary(len(res.ports), "ports (passive)", t.seconds, flagged=len(res.vulns))
+
+    out.blank()
+    data = {"target": target, "ip": ip, "intel": asdict(res)}
+
+    if save:
+        Path(save).write_text(jsonlib.dumps(data, indent=2, default=str), encoding="utf-8")
+        out.saved(save)
     if json_mode:
         jsonout.merge(data)
         jsonout.flush()
@@ -572,27 +768,35 @@ def crack(hash_input, wordlist, identify, json_mode):
 @cli.command()
 @click.argument("json_file")
 @click.option("--output", "-o", default="viper-report.html", show_default=True, help="Output file path.")
-@click.option("--format", "-f", "fmt", type=click.Choice(["html", "json"]), default="html", help="Report format.")
+@click.option("--format", "-f", "fmt",
+              type=click.Choice(["html", "json", "csv", "md", "sarif"]),
+              default="html", help="Report format.")
 def report(json_file, output, fmt):
     """Generate a report from any saved scan JSON file.
+
+    \b
+    Formats: html, json, csv, md (Markdown), sarif (code-scanning).
 
     \b
     Examples:
       viper bite google.com --save scan.json
       viper report scan.json -o report.html
-      viper report scan.json -o data.json --format json
+      viper report scan.json -o findings.csv --format csv
+      viper report scan.json -o report.md --format md
+      viper report scan.json -o viper.sarif --format sarif
     """
     import json as jsonlib
-    from viper.output.report import render_html, render_json
+    from viper.output.report import (render_html, render_json, render_csv,
+                                     render_markdown, render_sarif)
+
+    renderers = {"html": render_html, "json": render_json, "csv": render_csv,
+                 "md": render_markdown, "sarif": render_sarif}
 
     out.rule("EXPORT")
     out.blank()
     try:
         data = jsonlib.loads(open(json_file, encoding="utf-8").read())
-        if fmt == "html":
-            render_html(data, output)
-        else:
-            render_json(data, output)
+        renderers[fmt](data, output)
         out.saved(output)
     except FileNotFoundError:
         out.error(f"File not found: {json_file}")
@@ -622,7 +826,9 @@ def config_cmd(show, init, kv):
       viper config --set scan.timeout 0.3
       viper config --set scan.ports 1-65535
     """
-    from viper.core.config import load, save, init as do_init, ViperConfig, ScanConfig, ReconConfig, OutputConfig
+    from viper.core.config import (load, save, init as do_init, ViperConfig,
+                                    ScanConfig, ReconConfig, OutputConfig,
+                                    IntegrationsConfig)
     from dataclasses import asdict
 
     out.rule("CONFIG")
@@ -650,9 +856,10 @@ def config_cmd(show, init, kv):
                     except ValueError:
                         out.error(f"Invalid value for {key_path}: {value}")
         new_cfg = ViperConfig()
-        new_cfg.scan   = ScanConfig(**d["scan"])
-        new_cfg.recon  = ReconConfig(**d["recon"])
-        new_cfg.output = OutputConfig(**d["output"])
+        new_cfg.scan         = ScanConfig(**d["scan"])
+        new_cfg.recon        = ReconConfig(**d["recon"])
+        new_cfg.output       = OutputConfig(**d["output"])
+        new_cfg.integrations = IntegrationsConfig(**d.get("integrations", {}))
         save(new_cfg)
         out.blank()
         out.tag("info", "Saved.")
@@ -663,6 +870,9 @@ def config_cmd(show, init, kv):
             out.blank()
             out.console.print(f"  [venom]⟡ {section.upper()}[/venom]")
             for k, v in values.items():
+                # Never print secrets in full.
+                if section == "integrations" and v and ("key" in k or "secret" in k):
+                    v = str(v)[:4] + "…" + f" ({len(str(v))} chars)"
                 out.console.print(f"    [dim]{k:<18}[/dim][white]{v}[/white]")
         out.blank()
 

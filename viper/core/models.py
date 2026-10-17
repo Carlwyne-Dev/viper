@@ -119,6 +119,62 @@ def from_subs(subs: list) -> list[Finding]:
     ]
 
 
+def from_passive_subs(subs: list) -> list[Finding]:
+    """Passive (crt.sh) subdomain discoveries."""
+    return [
+        Finding(
+            severity="INFO", title=f"Subdomain: {s.subdomain}",
+            description=f"Discovered via {s.source} (certificate transparency)",
+            source="passive", category="subdomain",
+            target=s.subdomain, confidence=90,
+            metadata={"source": s.source},
+        )
+        for s in subs
+    ]
+
+
+def from_takeovers(takeovers: list) -> list[Finding]:
+    """Dangling subdomain-takeover candidates — high-value findings."""
+    findings = []
+    for t in takeovers:
+        findings.append(Finding(
+            severity="HIGH", title=f"Possible subdomain takeover: {t.subdomain}",
+            description=f"{t.detail}"
+                        + (f" (CNAME → {t.cname})" if t.cname else ""),
+            source="passive", category="takeover",
+            target=t.subdomain, confidence=t.confidence,
+            metadata={"service": t.service, "cname": t.cname},
+        ))
+    return findings
+
+
+def from_intel(intel) -> list[Finding]:
+    """Passive intelligence (Shodan) → Findings. No packets touched target."""
+    findings = []
+    if not intel or not getattr(intel, "available", False):
+        return findings
+    for port in intel.ports:
+        svc = next((s for s in intel.services if s.port == port), None)
+        label = f"{svc.product} {svc.version}".strip() if svc else ""
+        findings.append(Finding(
+            severity="INFO", title=f"Port {port} (passive)",
+            description=f"Known open on {intel.source}"
+                        + (f" — {label}" if label else ""),
+            source="intel", category="open-port",
+            target=str(port), confidence=70,
+            metadata={"source": intel.source, "product": label},
+        ))
+    for cve in intel.vulns:
+        findings.append(Finding(
+            severity="MED", title=cve,
+            description=f"{intel.source} flags this host as affected by {cve} — verify manually",
+            source="intel", category="cve",
+            target=cve, confidence=60,
+            metadata={"source": intel.source, "presumptive": True},
+        ))
+    return findings
+
+
 def from_dns(dns_result, domain: str) -> list[Finding]:
     findings = []
     from dataclasses import asdict
@@ -214,5 +270,25 @@ def from_web(web_result) -> list[Finding]:
                 target="ssl", confidence=100,
                 metadata={"days_left": ssl.days_left, "expires": ssl.expires},
             ))
+
+        # Deeper TLS posture (weak protocols / self-signed / hostname mismatch)
+        weak = getattr(ssl, "weak_protocols", []) or []
+        self_signed = getattr(ssl, "self_signed", False)
+        mismatch = getattr(ssl, "hostname_mismatch", False)
+        if weak or self_signed or mismatch:
+            try:
+                from viper.modules.web import tls_weakness_severity
+                verdict = tls_weakness_severity(weak, self_signed, mismatch)
+            except Exception:
+                verdict = None
+            if verdict:
+                sev, desc = verdict
+                findings.append(Finding(
+                    severity=sev, title="Weak TLS configuration",
+                    description=desc, source="web", category="tls-config",
+                    target="tls", confidence=95,
+                    metadata={"weak_protocols": weak, "self_signed": self_signed,
+                              "hostname_mismatch": mismatch},
+                ))
 
     return findings

@@ -13,11 +13,11 @@ dependencies = [
     "click>=8.0",
     "rich>=13.0",
     "textual>=0.50.0",
+    "dnspython>=2.0",
 ]
 
 [project.optional-dependencies]
 full = [
-    "dnspython",
     "python-whois",
 ]
 

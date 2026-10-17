@@ -18,7 +18,8 @@ from viper.output import terminal as out
 
 
 def run(target: str, save: str | None = None, silent: bool = False,
-        all_fangs: bool = False, json_mode: bool = False):
+        all_fangs: bool = False, json_mode: bool = False,
+        passive: bool = False, force: bool = False):
 
     if silent:    out.set_silent(True)
     if json_mode: jsonout.enable(); out.set_silent(True)
@@ -27,6 +28,23 @@ def run(target: str, save: str | None = None, silent: bool = False,
 
     out.rule("BITE FANG", target)
     out.tag("viper", f"Target locked → [cyan]{target}[/cyan]")
+
+    # ── Scope guard ─────────────────────────────────────────────────────────
+    from viper.core import scope
+    allowed, enforced = scope.check(target)
+    if enforced and not allowed:
+        if passive:
+            out.warn("Target not in scope — passive-only (no packets sent to target).")
+        elif force:
+            out.warn("Target not in scope — proceeding because --force was given.")
+        else:
+            out.error(f"'{target}' is not in your authorization scope "
+                      f"(~/.viper/scope.txt).")
+            out.tip("Add it to scope, run with --passive, or override with --force.")
+            out.set_silent(False); jsonout.disable()
+            return
+    if passive:
+        out.tag("viper", "[dim]passive mode — no packets sent to target[/dim]")
     out.blank()
 
     # Resolve
@@ -48,33 +66,39 @@ def run(target: str, save: str | None = None, silent: bool = False,
 
     results_data = {"target": target, "ip": ip}
 
-    # ── Port scan ─────────────────────────────────────────────────────────
-    out.rule("PORT FANG", target)
-    out.tag("scan", f"Scanning [dim]{cfg.scan.ports}[/dim]...")
-    out.blank()
+    # ── Port scan (active) ──────────────────────────────────────────────────
+    open_ports = []
+    if not passive:
+        out.rule("PORT FANG", target)
+        out.tag("scan", f"Scanning [dim]{cfg.scan.ports}[/dim]...")
+        out.blank()
 
-    port_list = scanner.parse_ports(cfg.scan.ports)
-    with out.Timer() as t:
-        if not silent and not json_mode:
-            with out.scan_progress(len(port_list)) as progress:
-                task = progress.add_task("port scan", total=len(port_list))
-                open_ports = scanner.scan(
-                    ip, cfg.scan.ports, timeout, cfg.scan.threads,
-                    on_progress=lambda: progress.advance(task),
-                )
-        else:
-            open_ports = scanner.scan(ip, cfg.scan.ports, timeout, cfg.scan.threads)
+        port_list = scanner.parse_ports(cfg.scan.ports)
+        with out.Timer() as t:
+            if not silent and not json_mode:
+                with out.scan_progress(len(port_list)) as progress:
+                    task = progress.add_task("port scan", total=len(port_list))
+                    open_ports = scanner.scan(
+                        ip, cfg.scan.ports, timeout, cfg.scan.threads,
+                        on_progress=lambda: progress.advance(task),
+                    )
+            else:
+                open_ports = scanner.scan(ip, cfg.scan.ports, timeout, cfg.scan.threads)
 
-    out.ports_table(open_ports)
-    flagged = sum(1 for p in open_ports if p.flagged)
-    out.summary(len(open_ports), "open ports", t.seconds, flagged)
-    results_data["ports"] = [asdict(p) for p in open_ports]
+        out.ports_table(open_ports)
+        flagged = sum(1 for p in open_ports if p.flagged)
+        out.summary(len(open_ports), "open ports", t.seconds, flagged)
+        results_data["ports"] = [asdict(p) for p in open_ports]
 
     # ── DNS ───────────────────────────────────────────────────────────────
     out.blank()
     out.rule("DNS FANG", target)
     out.tag("scan", "Resolving DNS records...")
     out.blank()
+
+    if not recon.HAS_DNSPYTHON:
+        out.warn("dnspython not installed — MX/NS/TXT/CNAME unavailable "
+                 "(pip install dnspython).")
 
     with out.Timer() as t:
         dns_result = recon.dns(target)
@@ -98,14 +122,27 @@ def run(target: str, save: str | None = None, silent: bool = False,
     out.blank()
 
     with out.Timer() as t:
-        subs = recon.subdomains(target, threads=50)
+        subs = [] if passive else recon.subdomains(target, threads=50)
+        # Passive enrichment: certificate-transparency names (crt.sh).
+        # Zero packets to the target, usually far more coverage than the
+        # brute-force wordlist. Never blocks the scan if crt.sh is down.
+        try:
+            from viper.modules import passive
+            resolved = {s.subdomain for s in subs}
+            passive_subs = [p for p in passive.crtsh_subdomains(target)
+                            if p.subdomain not in resolved]
+        except Exception:
+            passive_subs = []
 
     for s in subs:
         out.tag("found", f"[target]{s.subdomain}[/target]  [dim]{s.ip}[/dim]")
-    if not subs:
+    for p in passive_subs:
+        out.tag("found", f"[target]{p.subdomain}[/target]  [dim]crt.sh[/dim]")
+    if not subs and not passive_subs:
         out.tag("info", "No subdomains resolved.")
-    out.summary(len(subs), "subdomains found", t.seconds)
+    out.summary(len(subs) + len(passive_subs), "subdomains found", t.seconds)
     results_data["subs"] = [asdict(s) for s in subs]
+    results_data["passive_subs"] = [asdict(p) for p in passive_subs]
 
     # ── Vuln hints ────────────────────────────────────────────────────────
     vulns_found = []
@@ -133,8 +170,8 @@ def run(target: str, save: str | None = None, silent: bool = False,
         out.summary(len(vulns_found) + len(missing), "findings", t.seconds, flagged=crits)
         results_data["vulns"] = [asdict(v) for v in vulns_found]
 
-    # ── Web Fang (--all) ──────────────────────────────────────────────────
-    if all_fangs:
+    # ── Web Fang (--all; active) ────────────────────────────────────────────
+    if all_fangs and not passive:
         from viper.modules.web import scan as web_scan
         out.blank()
         out.rule("WEB FANG", target)
@@ -197,7 +234,7 @@ def run(target: str, save: str | None = None, silent: bool = False,
         _missing = missing if open_ports else []
         scan_result = _build_scan_result(
             target=target, ip=ip, open_ports=open_ports,
-            dns_result=dns_result, subs=subs,
+            dns_result=dns_result, subs=subs, passive_subs=passive_subs,
             vulns_found=_vulns, missing=_missing,
             web_result=web_r, raw=results_data,
         )
@@ -225,15 +262,21 @@ def run(target: str, save: str | None = None, silent: bool = False,
 
 def _build_scan_result(target: str, ip: str, open_ports, dns_result,
                        subs, vulns_found, missing, web_result=None,
+                       passive_subs=None, takeovers=None,
                        duration: float = 0.0, raw: dict = None) -> "ScanResult":
     """Normalize all module outputs into a unified ScanResult."""
     from viper.core.models import (
-        ScanResult, from_ports, from_subs, from_dns, from_vulns, from_web
+        ScanResult, from_ports, from_subs, from_dns, from_vulns, from_web,
+        from_passive_subs, from_takeovers,
     )
     findings = []
     findings += from_ports(open_ports, ip)
     findings += from_dns(dns_result, target)
     findings += from_subs(subs)
+    if passive_subs:
+        findings += from_passive_subs(passive_subs)
+    if takeovers:
+        findings += from_takeovers(takeovers)
     if vulns_found is not None:
         findings += from_vulns(vulns_found, missing or [])
     if web_result:

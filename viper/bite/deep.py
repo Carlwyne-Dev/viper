@@ -71,14 +71,26 @@ def run(target: str, output_dir: str = ".", json_mode: bool = False):
     out.tag("scan", "DNS records + WHOIS + subdomains...")
     out.blank()
 
+    if not recon.HAS_DNSPYTHON:
+        out.warn("dnspython not installed — MX/NS/TXT/CNAME unavailable.")
+
     with out.Timer() as t:
         dns_result = recon.dns(target)
         whois_data = recon.whois(target)
         subs       = recon.subdomains(target, threads=50)
+        # Passive certificate-transparency names (crt.sh), merged + deduped.
+        try:
+            from viper.modules import passive as _passive
+            resolved = {s.subdomain for s in subs}
+            passive_subs = [p for p in _passive.crtsh_subdomains(target)
+                            if p.subdomain not in resolved]
+        except Exception:
+            passive_subs = []
 
     data["dns"]   = asdict(dns_result)
     data["whois"] = whois_data
     data["subs"]  = [asdict(s) for s in subs]
+    data["passive_subs"] = [asdict(p) for p in passive_subs]
 
     for rtype in ("A", "AAAA", "MX", "NS", "TXT"):
         for val in getattr(dns_result, rtype, []):
@@ -88,7 +100,48 @@ def run(target: str, output_dir: str = ".", json_mode: bool = False):
     out.blank()
     for s in subs:
         out.tag("found", f"[target]{s.subdomain}[/target]  [dim]{s.ip}[/dim]")
-    out.summary(len(subs), "subdomains", t.seconds)
+    for p in passive_subs:
+        out.tag("found", f"[target]{p.subdomain}[/target]  [dim]crt.sh[/dim]")
+    out.summary(len(subs) + len(passive_subs), "subdomains", t.seconds)
+
+    # ── 2b. Subdomain takeover check ──────────────────────────────────────
+    takeovers = []
+    all_names = [s.subdomain for s in subs] + [p.subdomain for p in passive_subs]
+    if all_names:
+        out.blank()
+        out.rule("TAKEOVER FANG", target)
+        out.tag("scan", f"Checking {len(all_names)} names for dangling takeovers...")
+        out.blank()
+        try:
+            from viper.modules import passive as _passive
+            with out.console.status("  [dim]probing...[/dim]", spinner="dots"):
+                takeovers = _passive.check_takeovers(all_names)
+        except Exception:
+            takeovers = []
+        for tk in takeovers:
+            out.finding("HIGH", f"Takeover: {tk.subdomain}",
+                        f"{tk.service} — {tk.confidence}%")
+        if not takeovers:
+            out.tag("info", "No takeover candidates found.")
+    data["takeovers"] = [asdict(tk) for tk in takeovers]
+
+    # ── 2c. Passive intel (Shodan, if a key is configured) ────────────────
+    try:
+        from viper.modules import intel as _intel
+        if _intel.shodan_key(cfg):
+            out.blank()
+            out.rule("INTEL FANG", target)
+            with out.console.status("  [dim]querying shodan...[/dim]", spinner="dots"):
+                intel_res = _intel.shodan_host(ip, cfg)
+            if intel_res.available:
+                for s in intel_res.services:
+                    label = f"{s.product} {s.version}".strip()
+                    out.tag("found", f"[target]{s.port}/{s.transport}[/target]  [dim]{label}[/dim]")
+                for c in intel_res.vulns:
+                    out.finding("MED", c, "shodan-flagged — verify")
+            data["intel"] = asdict(intel_res)
+    except Exception:
+        pass
 
     # ── 3. Vuln scan ──────────────────────────────────────────────────────
     out.blank()

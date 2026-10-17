@@ -194,6 +194,275 @@ except Exception as e:
     fail("vuln", str(e))
     traceback.print_exc()
 
+# ── passive ──────────────────────────────────────────────────────────────────────
+print("\n  PASSIVE")
+try:
+    from viper.modules.passive import parse_crtsh, match_takeover
+    from viper.core.models import from_passive_subs, from_takeovers
+
+    # crt.sh parsing: dedupe, strip wildcards, keep only in-scope names.
+    payload = json.dumps([
+        {"name_value": "www.example.com\n*.example.com"},
+        {"name_value": "api.example.com"},
+        {"name_value": "www.example.com"},        # dup
+        {"name_value": "evil.com"},               # out of scope
+        {"name_value": "example.com"},            # apex, skip
+    ])
+    subs = parse_crtsh(payload, "example.com")
+    names = {s.subdomain for s in subs}
+    assert names == {"www.example.com", "api.example.com"}, names
+    ok(f"parse_crtsh: dedup+scope → {sorted(names)}")
+
+    assert parse_crtsh("not json", "example.com") == []
+    ok("parse_crtsh: bad payload graceful")
+
+    # Takeover fingerprint matching.
+    t1 = match_takeover("foo.github.io", "<h1>There isn't a GitHub Pages site here</h1>")
+    assert t1 and t1.vulnerable and t1.service == "GitHub Pages" and t1.confidence == 90
+    ok("match_takeover: GitHub Pages (cname+body) → 90%")
+
+    t2 = match_takeover("", "<Code>NoSuchBucket</Code>")
+    assert t2 and t2.vulnerable and t2.service == "AWS/S3" and t2.confidence == 60
+    ok("match_takeover: S3 body-only → 60%")
+
+    assert match_takeover("foo.github.io", "<html>live site, all good</html>") is None
+    ok("match_takeover: live site → no finding")
+
+    # Normalizers.
+    pf = from_passive_subs(subs)
+    assert len(pf) == 2 and pf[0].source == "passive" and pf[0].category == "subdomain"
+    t1.subdomain = "foo.example.com"
+    tf = from_takeovers([t1])
+    assert len(tf) == 1 and tf[0].severity == "HIGH" and tf[0].category == "takeover"
+    ok("passive normalizers → Findings")
+except Exception as e:
+    fail("passive", str(e))
+    traceback.print_exc()
+
+# ── intel ────────────────────────────────────────────────────────────────────────
+print("\n  INTEL")
+try:
+    import os as _os
+    from viper.modules.intel import parse_shodan_host, shodan_key, shodan_host
+    from viper.core.models import from_intel
+
+    payload = json.dumps({
+        "ip_str": "1.2.3.4", "org": "ExampleCorp", "os": None,
+        "hostnames": ["a.example.com"], "ports": [443, 22],
+        "tags": ["cloud"], "vulns": {"CVE-2021-1234": {}, "CVE-2020-9999": {}},
+        "data": [
+            {"port": 22, "transport": "tcp", "product": "OpenSSH", "version": "8.2", "data": "SSH-2.0-OpenSSH_8.2"},
+            {"port": 443, "transport": "tcp", "product": "nginx", "version": "1.18.0", "data": "HTTP/1.1 200"},
+        ],
+    })
+    r = parse_shodan_host("1.2.3.4", payload)
+    assert r.available and r.org == "ExampleCorp"
+    assert r.ports == [22, 443]
+    assert r.vulns == ["CVE-2020-9999", "CVE-2021-1234"]
+    assert len(r.services) == 2
+    ok("parse_shodan_host: ports, vulns, services")
+
+    bad = parse_shodan_host("1.2.3.4", "<<not json>>")
+    assert not bad.available and bad.error
+    ok("parse_shodan_host: bad payload graceful")
+
+    # Env var key resolution wins; absent key → unavailable (no network).
+    _os.environ.pop("VIPER_SHODAN_KEY", None)
+    assert shodan_key(None) == ""
+    _os.environ["VIPER_SHODAN_KEY"] = "ENVKEY"
+    assert shodan_key(None) == "ENVKEY"
+    _os.environ.pop("VIPER_SHODAN_KEY", None)
+    nokey = shodan_host("1.2.3.4", None)
+    assert not nokey.available and "no API key" in nokey.error
+    ok("shodan key resolution + no-key graceful")
+
+    findings = from_intel(r)
+    cats = {f.category for f in findings}
+    assert "open-port" in cats and "cve" in cats
+    assert all(f.source == "intel" for f in findings)
+    assert from_intel(bad) == []
+    ok(f"from_intel → {len(findings)} findings")
+except Exception as e:
+    fail("intel", str(e))
+    traceback.print_exc()
+
+# ── cvedb ────────────────────────────────────────────────────────────────────────
+print("\n  CVEDB")
+try:
+    from viper.core.cvedb import build_cpe, cpe_for_banner, _parse_nvd_payload
+
+    assert build_cpe("nginx", "nginx", "1.18.0") == "cpe:2.3:a:nginx:nginx:1.18.0:*:*:*:*:*:*:*"
+    assert build_cpe("apache", "http_server", "") == "cpe:2.3:a:apache:http_server:*:*:*:*:*:*:*:*"
+    ok("build_cpe: 2.3 URI")
+
+    label, cpe = cpe_for_banner("Server: Apache/2.4.49 (Unix)")
+    assert cpe == "cpe:2.3:a:apache:http_server:2.4.49:*:*:*:*:*:*:*", cpe
+    assert label == "http_server 2.4.49"
+    ok("cpe_for_banner: Apache → exact CPE")
+
+    label2, cpe2 = cpe_for_banner("SSH-2.0-OpenSSH_8.2p1")
+    assert cpe2.startswith("cpe:2.3:a:openbsd:openssh:8.2")
+    ok("cpe_for_banner: OpenSSH")
+
+    assert cpe_for_banner("totally unknown banner") == (None, None)
+    ok("cpe_for_banner: unknown → (None, None)")
+
+    # NVD payload parser (pure).
+    sample = {"vulnerabilities": [{"cve": {
+        "id": "CVE-2021-41773",
+        "descriptions": [{"lang": "en", "value": "Path traversal in Apache 2.4.49"}],
+        "metrics": {"cvssMetricV31": [{"cvssData": {"baseScore": 7.5, "baseSeverity": "HIGH"}}]},
+        "references": [{"url": "https://example.com"}],
+        "published": "2021-10-05T00:00:00", "lastModified": "2021-11-01T00:00:00",
+    }}]}
+    parsed = _parse_nvd_payload(sample)
+    assert len(parsed) == 1 and parsed[0].id == "CVE-2021-41773"
+    assert parsed[0].viper_severity == "HIGH" and parsed[0].cvss_score == 7.5
+    assert _parse_nvd_payload({}) == []
+    ok("_parse_nvd_payload: fields + empty graceful")
+except Exception as e:
+    fail("cvedb", str(e))
+    traceback.print_exc()
+
+# ── tls ──────────────────────────────────────────────────────────────────────────
+print("\n  TLS")
+try:
+    from viper.modules.web import tls_weakness_severity
+
+    assert tls_weakness_severity([], False, False) is None
+    ok("tls: clean config → no finding")
+
+    sev, desc = tls_weakness_severity(["TLSv1", "TLSv1.1"], False, False)
+    assert sev == "MED" and "TLSv1" in desc
+    ok("tls: deprecated protocols → MED")
+
+    sev2, _ = tls_weakness_severity([], False, True)
+    assert sev2 == "HIGH"
+    ok("tls: hostname mismatch → HIGH")
+
+    sev3, d3 = tls_weakness_severity([], True, False)
+    assert sev3 == "MED" and "self-signed" in d3
+    ok("tls: self-signed → MED")
+except Exception as e:
+    fail("tls", str(e))
+    traceback.print_exc()
+
+# ── targets ────────────────────────────────────────────────────────────────────
+print("\n  TARGETS")
+try:
+    from viper.core import targets as tgt
+
+    assert tgt.expand("example.com") == ["example.com"]
+    ok("expand: single host passthrough")
+
+    # /30 → 2 usable hosts
+    assert tgt.expand("10.0.0.0/30") == ["10.0.0.1", "10.0.0.2"]
+    ok("expand: CIDR /30 → usable hosts")
+
+    # /32 → the single address
+    assert tgt.expand("10.0.0.5/32") == ["10.0.0.5"]
+    ok("expand: CIDR /32 → host itself")
+
+    assert tgt.expand("10.0.0.1-3") == ["10.0.0.1", "10.0.0.2", "10.0.0.3"]
+    ok("expand: dash range shorthand")
+
+    mixed = tgt.expand("a.com, 10.0.0.0/31, a.com")
+    assert mixed == ["a.com", "10.0.0.0", "10.0.0.1"]
+    ok("expand: comma list, dedup, CIDR mix")
+
+    with tempfile.TemporaryDirectory() as d:
+        fp = pathlib.Path(d) / "t.txt"
+        fp.write_text("# comment\na.com\n10.0.0.0/30\n\nb.com # trailing\n", encoding="utf-8")
+        hosts = tgt.from_file(str(fp))
+    assert hosts == ["a.com", "10.0.0.1", "10.0.0.2", "b.com"]
+    ok("from_file: comments, blanks, inline # stripped")
+except Exception as e:
+    fail("targets", str(e))
+    traceback.print_exc()
+
+# ── exports ────────────────────────────────────────────────────────────────────
+print("\n  EXPORTS")
+try:
+    from viper.output.report import (normalize_findings, build_markdown,
+                                     build_sarif, render_csv)
+
+    # From ScanResult-style dict.
+    sr_data = {"target": "t.com", "findings": [
+        {"severity": "HIGH", "title": "Takeover: x.t.com", "description": "dangling",
+         "source": "passive", "category": "takeover", "target": "x.t.com", "confidence": 90},
+        {"severity": "INFO", "title": "Port 80 open", "description": "HTTP",
+         "source": "port", "category": "open-port", "target": "80", "confidence": 100},
+    ]}
+    nf = normalize_findings(sr_data)
+    assert len(nf) == 2 and nf[0]["severity"] == "HIGH"
+    ok("normalize_findings: ScanResult dict")
+
+    # From raw scan dict.
+    raw_data = {"target": "t.com",
+                "ports": [{"port": 22, "service": "SSH", "flagged": False}],
+                "vulns": [{"cve": "CVE-1", "severity": "CRIT", "desc": "x", "port": 22}],
+                "takeovers": [{"subdomain": "a.t.com", "detail": "d", "confidence": 90}]}
+    nf2 = normalize_findings(raw_data)
+    cats = {r["category"] for r in nf2}
+    assert cats == {"open-port", "cve", "takeover"}
+    ok("normalize_findings: raw scan dict")
+
+    md = build_markdown(sr_data)
+    assert md.startswith("# Viper Report — t.com") and "| HIGH |" in md
+    ok("build_markdown: table + header")
+
+    sarif = build_sarif(sr_data)
+    assert sarif["version"] == "2.1.0"
+    assert sarif["runs"][0]["results"][0]["level"] == "error"   # HIGH → error
+    assert sarif["runs"][0]["results"][1]["level"] == "note"    # INFO → note
+    ok("build_sarif: schema + severity→level")
+
+    with tempfile.TemporaryDirectory() as d:
+        cp = pathlib.Path(d) / "f.csv"
+        render_csv(sr_data, str(cp))
+        txt = cp.read_text(encoding="utf-8")
+    assert "severity,source,category" in txt and "x.t.com" in txt
+    ok("render_csv: header + rows")
+except Exception as e:
+    fail("exports", str(e))
+    traceback.print_exc()
+
+# ── scope ──────────────────────────────────────────────────────────────────────
+print("\n  SCOPE")
+try:
+    from viper.core import scope
+
+    # Empty scope = unrestricted.
+    assert scope.in_scope("anything.com", []) is True
+    ok("in_scope: empty → unrestricted")
+
+    pats = ["example.com", "*.example.com", "10.0.0.0/24", "# a comment"]
+    assert scope.in_scope("example.com", pats) is True
+    assert scope.in_scope("api.example.com", pats) is True
+    assert scope.in_scope("evil.com", pats) is False
+    assert scope.in_scope("10.0.0.55", pats) is True
+    assert scope.in_scope("10.0.1.1", pats) is False
+    ok("in_scope: exact, wildcard, CIDR, deny")
+
+    # Wildcard should not match the apex.
+    assert scope.in_scope("example.com", ["*.example.com"]) is False
+    ok("in_scope: wildcard excludes apex")
+
+    with tempfile.TemporaryDirectory() as d:
+        sp = pathlib.Path(d) / "scope.txt"
+        sp.write_text("# scope\nexample.com\n*.example.com\n", encoding="utf-8")
+        allowed, enforced = scope.check("api.example.com", sp)
+        assert allowed and enforced
+        allowed2, enforced2 = scope.check("evil.com", sp)
+        assert not allowed2 and enforced2
+        # Missing file → not enforced.
+        allowed3, enforced3 = scope.check("evil.com", pathlib.Path(d) / "nope.txt")
+        assert allowed3 and not enforced3
+    ok("check: enforced in/out + missing file")
+except Exception as e:
+    fail("scope", str(e))
+    traceback.print_exc()
+
 # ── result ─────────────────────────────────────────────────────────────────────
 print(f"\n  {'─'*48}")
 print(f"  {PASS} passed  {FAIL} failed")

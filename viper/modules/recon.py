@@ -8,6 +8,12 @@ import socket
 import concurrent.futures
 from dataclasses import dataclass, field
 
+try:
+    import dns.resolver  # noqa: F401
+    HAS_DNSPYTHON = True
+except ImportError:
+    HAS_DNSPYTHON = False
+
 SUBDOMAIN_WORDLIST = [
     "www", "mail", "ftp", "api", "dev", "staging", "test", "admin",
     "vpn", "remote", "portal", "app", "mobile", "beta", "cdn",

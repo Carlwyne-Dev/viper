@@ -124,6 +124,10 @@ class SslResult:
     tls_version: str  = ""
     expired:     bool = False
     expiring_soon: bool = False
+    # Deeper TLS posture
+    weak_protocols: list = field(default_factory=list)  # e.g. ["TLSv1", "TLSv1.1"]
+    self_signed:    bool = False
+    hostname_mismatch: bool = False
 
 
 @dataclass
@@ -236,8 +240,65 @@ def _fingerprint_tech(headers: dict, body: str) -> list[TechResult]:
     return results
 
 
+# Protocols considered weak/deprecated (RFC 8996 deprecates TLS 1.0/1.1).
+_WEAK_TLS = {
+    "TLSv1":   getattr(ssl, "TLSVersion", None) and ssl.TLSVersion.TLSv1,
+    "TLSv1.1": getattr(ssl, "TLSVersion", None) and ssl.TLSVersion.TLSv1_1,
+}
+
+
+def tls_weakness_severity(weak_protocols: list, self_signed: bool,
+                          hostname_mismatch: bool) -> tuple | None:
+    """
+    Pure decision: given TLS posture, return (severity, description) or None.
+    Separated from the network probe so it can be unit-tested.
+    """
+    if hostname_mismatch:
+        return ("HIGH", "TLS certificate hostname mismatch")
+    if weak_protocols:
+        return ("MED", "Deprecated TLS protocol(s) accepted: " + ", ".join(weak_protocols))
+    if self_signed:
+        return ("MED", "TLS certificate is self-signed")
+    return None
+
+
+def _probe_weak_protocols(host: str, port: int, timeout: float) -> list:
+    """Return the deprecated TLS versions the server still accepts."""
+    accepted = []
+    for name, version in _WEAK_TLS.items():
+        if not version:
+            continue
+        try:
+            ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+            ctx.minimum_version = version
+            ctx.maximum_version = version
+            with socket.create_connection((host, port), timeout=timeout) as sock:
+                with ctx.wrap_socket(sock, server_hostname=host):
+                    accepted.append(name)
+        except Exception:
+            pass  # handshake refused = good, protocol not supported
+    return accepted
+
+
 def _check_ssl(host: str, port: int = 443, timeout: float = 5.0) -> SslResult:
     result = SslResult()
+    # First, a strict handshake to detect self-signed / hostname issues.
+    try:
+        strict = ssl.create_default_context()
+        with socket.create_connection((host, port), timeout=timeout) as sock:
+            with strict.wrap_socket(sock, server_hostname=host):
+                pass
+    except ssl.SSLCertVerificationError as e:
+        msg = str(e).lower()
+        if "self-signed" in msg or "self signed" in msg:
+            result.self_signed = True
+        if "hostname mismatch" in msg or "doesn't match" in msg:
+            result.hostname_mismatch = True
+    except Exception:
+        pass
+
     try:
         ctx = ssl.create_default_context()
         with socket.create_connection((host, port), timeout=timeout) as sock:
@@ -264,6 +325,12 @@ def _check_ssl(host: str, port: int = 443, timeout: float = 5.0) -> SslResult:
                     result.expiring_soon = 0 <= result.days_left <= 30
     except ssl.SSLCertVerificationError:
         result.valid = False
+    except Exception:
+        pass
+
+    # Probe for deprecated TLS versions (independent of cert validity).
+    try:
+        result.weak_protocols = _probe_weak_protocols(host, port, timeout)
     except Exception:
         pass
     return result

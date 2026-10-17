@@ -170,3 +170,124 @@ def render_html(data: dict, path: str):
 def render_json(data: dict, path: str):
     data["generated"] = datetime.datetime.now().isoformat()
     Path(path).write_text(json.dumps(data, indent=2, default=str), encoding="utf-8")
+
+
+# ── Findings-based exporters (CSV / Markdown / SARIF) ────────────────────────
+
+def normalize_findings(data: dict) -> list[dict]:
+    """
+    Produce a flat findings list from either a ScanResult-style dict (has
+    "findings") or a raw scan dict (has ports/vulns/subs/…). Pure, testable.
+    """
+    if isinstance(data.get("findings"), list):
+        return [
+            {
+                "severity":    f.get("severity", "INFO"),
+                "title":       f.get("title", ""),
+                "description": f.get("description", ""),
+                "source":      f.get("source", ""),
+                "category":    f.get("category", ""),
+                "target":      f.get("target", ""),
+                "confidence":  f.get("confidence", 100),
+            }
+            for f in data["findings"]
+        ]
+
+    out = []
+    for p in data.get("ports", []):
+        out.append({"severity": "MED" if p.get("flagged") else "LOW",
+                    "title": f"Port {p.get('port')} open", "description": p.get("service", ""),
+                    "source": "port", "category": "open-port",
+                    "target": str(p.get("port", "")), "confidence": 100})
+    for v in data.get("vulns", []):
+        out.append({"severity": v.get("severity", "INFO"),
+                    "title": v.get("cve", ""), "description": v.get("desc", ""),
+                    "source": "vuln", "category": "cve",
+                    "target": str(v.get("port", "")),
+                    "confidence": v.get("confidence", 60)})
+    for s in data.get("subs", []):
+        out.append({"severity": "INFO", "title": f"Subdomain: {s.get('subdomain')}",
+                    "description": s.get("ip", ""), "source": "dns", "category": "subdomain",
+                    "target": s.get("subdomain", ""), "confidence": 100})
+    for s in data.get("passive_subs", []):
+        out.append({"severity": "INFO", "title": f"Subdomain: {s.get('subdomain')}",
+                    "description": s.get("source", "crt.sh"), "source": "passive",
+                    "category": "subdomain", "target": s.get("subdomain", ""), "confidence": 90})
+    for t in data.get("takeovers", []):
+        out.append({"severity": "HIGH", "title": f"Takeover: {t.get('subdomain')}",
+                    "description": t.get("detail", ""), "source": "passive",
+                    "category": "takeover", "target": t.get("subdomain", ""),
+                    "confidence": t.get("confidence", 0)})
+    return out
+
+
+_SARIF_LEVEL = {"CRIT": "error", "HIGH": "error", "MED": "warning",
+                "LOW": "note", "INFO": "note"}
+
+
+def render_csv(data: dict, path: str):
+    import csv
+    rows = normalize_findings(data)
+    with open(path, "w", newline="", encoding="utf-8") as fh:
+        w = csv.writer(fh)
+        w.writerow(["severity", "source", "category", "title", "target", "confidence", "description"])
+        for r in rows:
+            w.writerow([r["severity"], r["source"], r["category"], r["title"],
+                        r["target"], r["confidence"], r["description"]])
+
+
+def render_markdown(data: dict, path: str):
+    Path(path).write_text(build_markdown(data), encoding="utf-8")
+
+
+def build_markdown(data: dict) -> str:
+    rows = normalize_findings(data)
+    order = {"CRIT": 0, "HIGH": 1, "MED": 2, "LOW": 3, "INFO": 4}
+    rows = sorted(rows, key=lambda r: order.get(r["severity"], 9))
+    target = data.get("target", "unknown")
+    lines = [f"# Viper Report — {target}", ""]
+    counts = {}
+    for r in rows:
+        counts[r["severity"]] = counts.get(r["severity"], 0) + 1
+    summary = " · ".join(f"{k}: {counts[k]}" for k in ("CRIT", "HIGH", "MED", "LOW", "INFO") if k in counts)
+    lines.append(f"**{len(rows)} findings** — {summary or 'none'}")
+    lines.append("")
+    lines.append("| Severity | Source | Title | Target | Conf | Detail |")
+    lines.append("|---|---|---|---|---|---|")
+    for r in rows:
+        detail = (r["description"] or "").replace("|", "\\|")
+        lines.append(f"| {r['severity']} | {r['source']} | {r['title']} | "
+                     f"{r['target']} | {r['confidence']}% | {detail} |")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def build_sarif(data: dict) -> dict:
+    rows = normalize_findings(data)
+    results = []
+    rule_ids = {}
+    for r in rows:
+        rule_id = f"{r['source']}/{r['category']}" or "finding"
+        rule_ids[rule_id] = rule_ids.get(rule_id, 0) + 1
+        results.append({
+            "ruleId": rule_id,
+            "level": _SARIF_LEVEL.get(r["severity"], "note"),
+            "message": {"text": f"[{r['severity']}] {r['title']} — {r['description']}".strip(" —")},
+            "properties": {"severity": r["severity"], "confidence": r["confidence"],
+                           "target": r["target"]},
+        })
+    return {
+        "version": "2.1.0",
+        "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+        "runs": [{
+            "tool": {"driver": {
+                "name": "Viper", "informationUri": "https://github.com/Carlwyne-Dev/viper",
+                "rules": [{"id": rid} for rid in sorted(rule_ids)],
+            }},
+            "results": results,
+        }],
+    }
+
+
+def render_sarif(data: dict, path: str):
+    Path(path).write_text(json.dumps(build_sarif(data), indent=2, default=str), encoding="utf-8")

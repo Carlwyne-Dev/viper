@@ -26,15 +26,30 @@ class OutputConfig:
     timestamp:  bool = True
 
 @dataclass
+class IntegrationsConfig:
+    """API keys for passive intelligence sources. Empty = disabled.
+
+    Keys may also be supplied via environment variables, which take
+    precedence: VIPER_SHODAN_KEY, VIPER_NVD_KEY, VIPER_CENSYS_ID,
+    VIPER_CENSYS_SECRET.
+    """
+    shodan_key:    str = ""
+    nvd_key:       str = ""
+    censys_id:     str = ""
+    censys_secret: str = ""
+
+@dataclass
 class ViperConfig:
-    scan:   ScanConfig   = None
-    recon:  ReconConfig  = None
-    output: OutputConfig = None
+    scan:         ScanConfig         = None
+    recon:        ReconConfig        = None
+    output:       OutputConfig       = None
+    integrations: IntegrationsConfig = None
 
     def __post_init__(self):
-        self.scan   = self.scan   or ScanConfig()
-        self.recon  = self.recon  or ReconConfig()
-        self.output = self.output or OutputConfig()
+        self.scan         = self.scan         or ScanConfig()
+        self.recon        = self.recon        or ReconConfig()
+        self.output       = self.output       or OutputConfig()
+        self.integrations = self.integrations or IntegrationsConfig()
 
 
 def load() -> ViperConfig:
@@ -46,6 +61,7 @@ def load() -> ViperConfig:
         if "scan"   in raw: cfg.scan   = ScanConfig(**{k: v for k, v in raw["scan"].items()   if hasattr(ScanConfig,   k)})
         if "recon"  in raw: cfg.recon  = ReconConfig(**{k: v for k, v in raw["recon"].items() if hasattr(ReconConfig,  k)})
         if "output" in raw: cfg.output = OutputConfig(**{k: v for k, v in raw["output"].items() if hasattr(OutputConfig, k)})
+        if "integrations" in raw: cfg.integrations = IntegrationsConfig(**{k: v for k, v in raw["integrations"].items() if hasattr(IntegrationsConfig, k)})
         return cfg
     except Exception:
         return ViperConfig()
@@ -54,9 +70,10 @@ def load() -> ViperConfig:
 def save(cfg: ViperConfig):
     CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
     data = {
-        "scan":   asdict(cfg.scan),
-        "recon":  asdict(cfg.recon),
-        "output": asdict(cfg.output),
+        "scan":         asdict(cfg.scan),
+        "recon":        asdict(cfg.recon),
+        "output":       asdict(cfg.output),
+        "integrations": asdict(cfg.integrations),
     }
     CONFIG_PATH.write_text(json.dumps(data, indent=2), encoding="utf-8")
 

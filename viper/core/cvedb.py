@@ -83,29 +83,21 @@ def _cache_write(path: Path, cves: list[CVE]):
 
 # ── NVD fetcher ────────────────────────────────────────────────────────────────
 
-def _fetch_nvd(keyword: str, results_per_page: int = 20) -> list[CVE]:
-    """
-    Query NVD API for CVEs matching a keyword.
-    Returns list of CVE objects sorted by CVSS score descending.
-    """
-    params = urllib.parse.urlencode({
-        "keywordSearch":   keyword,
-        "resultsPerPage":  results_per_page,
-        "sortBy":          "publishedDate",
-        "sortOrder":       "dsc",
-    })
-    url = f"{NVD_BASE}?{params}"
-
+def _http_json(url: str) -> dict:
+    """GET a URL and parse JSON. Returns {} on any failure. Never raises."""
     try:
         req = urllib.request.Request(url, headers={
             "User-Agent": "Viper-CLI/1.0 (security research tool)",
             "Accept":     "application/json",
         })
         with urllib.request.urlopen(req, timeout=15) as r:
-            data = json.loads(r.read().decode("utf-8"))
-    except Exception as e:
-        return []
+            return json.loads(r.read().decode("utf-8"))
+    except Exception:
+        return {}
 
+
+def _parse_nvd_payload(data: dict) -> list[CVE]:
+    """Parse an NVD 2.0 response dict into CVE objects (pure, no network)."""
     cves = []
     for item in data.get("vulnerabilities", []):
         cve_data = item.get("cve", {})
@@ -160,7 +152,19 @@ def _fetch_nvd(keyword: str, results_per_page: int = 20) -> list[CVE]:
             references=refs, cpe_matches=cpes[:5],
         ))
 
-    # Sort by CVSS score descending
+    return cves
+
+
+def _fetch_nvd(keyword: str, results_per_page: int = 20) -> list[CVE]:
+    """Query NVD by keyword; returns CVEs sorted by CVSS score descending."""
+    params = urllib.parse.urlencode({
+        "keywordSearch":   keyword,
+        "resultsPerPage":  results_per_page,
+        "sortBy":          "publishedDate",
+        "sortOrder":       "dsc",
+    })
+    url = f"{NVD_BASE}?{params}"
+    cves = _parse_nvd_payload(_http_json(url))
     return sorted(cves, key=lambda c: c.cvss_score, reverse=True)
 
 
@@ -206,42 +210,86 @@ def by_id(cve_id: str) -> CVE | None:
         return None
 
 
-def for_banner(banner: str) -> list[CVE]:
+# ── CPE-based matching ───────────────────────────────────────────────────────
+# Mapping a service banner to an exact CPE lets NVD do authoritative
+# version-range matching, instead of us guessing with regexes. This map is the
+# maintainable surface: (banner_regex → (cpe_vendor, cpe_product, version_group)).
+# Vendor/product strings follow NVD's CPE dictionary.
+CPE_PATTERNS = [
+    (r"nginx/([\d.]+)",          "nginx",       "nginx"),
+    (r"Apache/([\d.]+)",         "apache",      "http_server"),
+    (r"OpenSSH[_ ]([\d.]+)",     "openbsd",     "openssh"),
+    (r"OpenSSL/([\d.]+)",        "openssl",     "openssl"),
+    (r"PHP/([\d.]+)",            "php",         "php"),
+    (r"MySQL\s+([\d.]+)",        "oracle",      "mysql"),
+    (r"Redis\s+([\d.]+)",        "redis",       "redis"),
+    (r"vsftpd\s*([\d.]+)",       "vsftpd_project", "vsftpd"),
+    (r"Exim\s+([\d.]+)",         "exim",        "exim"),
+    (r"ProFTPD\s*([\d.]+)",      "proftpd",     "proftpd"),
+    (r"PostgreSQL\s+([\d.]+)",   "postgresql",  "postgresql"),
+    (r"MongoDB\s+([\d.]+)",      "mongodb",     "mongodb"),
+]
+
+
+def build_cpe(vendor: str, product: str, version: str) -> str:
+    """Build a CPE 2.3 application URI for an exact product version."""
+    v = version.strip() or "*"
+    return f"cpe:2.3:a:{vendor}:{product}:{v}:*:*:*:*:*:*:*"
+
+
+def cpe_for_banner(banner: str):
     """
-    Auto-search CVEs based on a service banner string.
-    Extracts product + version from common banner patterns.
+    Extract (product_label, cpe) from a banner using CPE_PATTERNS.
+    Returns (None, None) when nothing recognizable is present.
+    Pure function — no network.
     """
     import re
-
-    queries = []
-
-    patterns = [
-        (r"nginx/([\d.]+)",          lambda m: f"nginx {m.group(1)}"),
-        (r"Apache/([\d.]+)",         lambda m: f"Apache httpd {m.group(1)}"),
-        (r"OpenSSH[_ ]([\d.]+)",     lambda m: f"OpenSSH {m.group(1)}"),
-        (r"OpenSSL/([\d.]+)",        lambda m: f"OpenSSL {m.group(1)}"),
-        (r"PHP/([\d.]+)",            lambda m: f"PHP {m.group(1)}"),
-        (r"MySQL\s+([\d.]+)",        lambda m: f"MySQL {m.group(1)}"),
-        (r"Redis\s+([\d.]+)",        lambda m: f"Redis {m.group(1)}"),
-        (r"Microsoft-IIS/([\d.]+)",  lambda m: f"IIS {m.group(1)}"),
-        (r"vsftpd\s*([\d.]+)",       lambda m: f"vsftpd {m.group(1)}"),
-        (r"Exim\s+([\d.]+)",         lambda m: f"Exim {m.group(1)}"),
-        (r"ProFTPD\s*([\d.]+)",      lambda m: f"ProFTPD {m.group(1)}"),
-        (r"PostgreSQL\s+([\d.]+)",   lambda m: f"PostgreSQL {m.group(1)}"),
-        (r"MongoDB\s+([\d.]+)",      lambda m: f"MongoDB {m.group(1)}"),
-    ]
-
-    for pattern, query_fn in patterns:
+    for pattern, vendor, product in CPE_PATTERNS:
         m = re.search(pattern, banner, re.IGNORECASE)
         if m:
-            queries.append(query_fn(m))
+            version = m.group(1)
+            return f"{product} {version}", build_cpe(vendor, product, version)
+    return None, None
 
-    if not queries:
-        return []
 
-    # Search for first match (rate limit friendly)
-    query = queries[0]
-    return search(query, max_results=5)
+def by_cpe(cpe: str, max_results: int = 10, force_refresh: bool = False) -> list[CVE]:
+    """
+    Query NVD for CVEs affecting an exact CPE. NVD applies the vulnerable
+    version ranges server-side, so results are far more precise than keyword
+    search. Cached like search().
+    """
+    cache_key = f"cpe:{cpe}:{max_results}"
+    path      = _cache_path(cache_key)
+    if not force_refresh and _cache_valid(path):
+        cached = _cache_read(path)
+        if cached is not None:
+            return cached[:max_results]
+
+    params = urllib.parse.urlencode({
+        "cpeName":        cpe,
+        "resultsPerPage": max_results,
+    })
+    url = f"{NVD_BASE}?{params}"
+    cves = _parse_nvd_payload(_http_json(url))
+    cves = sorted(cves, key=lambda c: c.cvss_score, reverse=True)
+    if cves:
+        _cache_write(path, cves)
+    return cves[:max_results]
+
+
+def for_banner(banner: str) -> list[CVE]:
+    """
+    Auto-search CVEs for a service banner. Prefers exact CPE matching
+    (NVD does version-range logic); falls back to keyword search.
+    """
+    label, cpe = cpe_for_banner(banner)
+    if cpe:
+        cves = by_cpe(cpe, max_results=5)
+        if cves:
+            return cves
+        if label:
+            return search(label, max_results=5)
+    return []
 
 
 def cache_stats() -> dict:
