@@ -96,20 +96,25 @@ def _ports(ports: list) -> str:
     for p in ports:
         flag = "<td><span class='flag'>▲ flagged</span></td>" if p.get('flagged') else "<td></td>"
         row = "<tr>" + f"<td class='port'>{p['port']}</td><td class='open'>OPEN</td><td class='svc'>{p.get('service','')}</td>" + flag + "</tr>"
-        rows.append(row)
+    joined = "".join(rows)
     return f"<table><thead><tr><th>PORT</th><th>STATE</th><th>SERVICE</th><th></th></tr></thead><tbody>{joined}</tbody></table>"
-    return f"<table><thead><tr><th>PORT</th><th>STATE</th><th>SERVICE</th><th></th></tr></thead><tbody>{rows}</tbody></table>"
+
 
 
 def _vulns(vulns: list) -> str:
     if not vulns:
         return "<div style='color:var(--dm);padding:.5rem 0'>No findings.</div>"
     sev_order = {"CRIT": 0, "HIGH": 1, "MED": 2, "LOW": 3}
+    def _desc(v: dict) -> str:
+        d = v.get("desc", "")
+        if v.get("presumptive", True):
+            d += " <span style='color:var(--dm)'>(presumptive — verify manually)</span>"
+        return d
     rows = "".join(
         f"<tr>"
         f"<td class='{v['severity'].lower()}'>{v['severity']}</td>"
         f"<td class='cve'>{v['cve']}</td>"
-        f"<td>{v['desc']}</td>"
+        f"<td>{_desc(v)}</td>"
         f"<td class='ip'>{str(v.get('banner',''))[:40]}</td>"
         f"</tr>"
         for v in sorted(vulns, key=lambda x: sev_order.get(x.get("severity",""), 9))

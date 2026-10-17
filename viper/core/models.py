@@ -136,11 +136,17 @@ def from_dns(dns_result, domain: str) -> list[Finding]:
 def from_vulns(vulns: list, missing_headers: list) -> list[Finding]:
     findings = []
     for v in vulns:
+        presumptive = getattr(v, "presumptive", True)
+        confidence = getattr(v, "confidence", 60)
+        desc = v.desc
+        if presumptive:
+            desc = f"{desc} — presumptive (banner match; verify manually)"
         findings.append(Finding(
             severity=v.severity, title=v.cve,
-            description=v.desc, source="vuln", category="cve",
-            target=str(v.port), confidence=85,
-            metadata={"banner": v.banner, "service": v.service, "port": v.port},
+            description=desc, source="vuln", category="cve",
+            target=str(v.port), confidence=confidence,
+            metadata={"banner": v.banner, "service": v.service,
+                      "port": v.port, "presumptive": presumptive},
         ))
     for m in missing_headers:
         findings.append(Finding(

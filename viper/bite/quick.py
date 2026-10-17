@@ -123,7 +123,7 @@ def run(target: str, save: str | None = None, silent: bool = False,
 
         if vulns_found:
             for v in sorted(vulns_found, key=lambda x: out.SEVERITY_RANK.get(x.severity, 9)):
-                out.finding(v.severity, v.cve, v.desc)
+                out.finding(v.severity, v.cve, v.display_desc)
         for m in missing:
             out.finding("LOW", f"Missing header: {m.header}", f"port {m.port}")
         if not vulns_found and not missing:

@@ -150,6 +150,50 @@ try:
 except Exception as e:
     fail("report", str(e))
 
+# ── vuln ───────────────────────────────────────────────────────────────────────
+print("\n  VULN")
+try:
+    import re as _re
+    from viper.modules.vuln import SIGNATURES, VulnResult
+    from viper.core.models import from_vulns
+
+    # Every signature pattern must compile.
+    for pattern, *_ in SIGNATURES:
+        _re.compile(pattern)
+    ok(f"all {len(SIGNATURES)} signature patterns compile")
+
+    # Known-vulnerable banners match the expected CVE.
+    def match_cves(banner):
+        return [cve for pat, svc, cve, sev, desc in SIGNATURES
+                if _re.search(pat, banner, _re.IGNORECASE)]
+    assert "CVE-2011-2523" in match_cves("220 (vsFTPd 2.3.4)")
+    assert "CVE-2014-0160" in match_cves("OpenSSL/1.0.1")
+    assert "CVE-2021-41773" in match_cves("Apache/2.4.49 (Unix)")
+    ok("known banners match expected CVEs")
+
+    # A clearly-patched / unrelated banner matches nothing.
+    assert match_cves("nginx/1.99.0") == []
+    ok("non-vulnerable banner yields no match")
+
+    # Signature matches are presumptive and carry a sub-100 confidence.
+    v = VulnResult(port=21, service="FTP", cve="CVE-2011-2523",
+                   severity="CRIT", desc="Backdoor", banner="vsFTPd 2.3.4")
+    assert v.presumptive is True and v.confidence < 100
+    assert "presumptive" in v.display_desc.lower()
+    ok("VulnResult defaults to presumptive with marker")
+
+    # from_vulns propagates confidence and flags the finding.
+    findings = from_vulns([v], [])
+    assert len(findings) == 1
+    f = findings[0]
+    assert f.confidence == v.confidence
+    assert f.metadata.get("presumptive") is True
+    assert "verify" in f.description.lower()
+    ok("from_vulns carries confidence + presumptive flag")
+except Exception as e:
+    fail("vuln", str(e))
+    traceback.print_exc()
+
 # ── result ─────────────────────────────────────────────────────────────────────
 print(f"\n  {'─'*48}")
 print(f"  {PASS} passed  {FAIL} failed")

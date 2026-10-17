@@ -37,12 +37,23 @@ DEFAULT_PORTS = [21, 22, 23, 25, 80, 443, 8080, 8443, 3306, 5432, 6379, 27017]
 
 @dataclass
 class VulnResult:
-    port:     int
-    service:  str
-    cve:      str
-    severity: str
-    desc:     str
-    banner:   str
+    port:        int
+    service:     str
+    cve:         str
+    severity:    str
+    desc:        str
+    banner:      str
+    # Banner/version matches are inferred, not proven: the service may be
+    # patched (distros backport fixes), the banner may be spoofed or stripped,
+    # or the version may not be in the vulnerable range after all.
+    presumptive: bool = True
+    confidence:  int  = 60    # 0–100; how much to trust this match
+
+    @property
+    def display_desc(self) -> str:
+        if self.presumptive:
+            return f"{self.desc} — presumptive, verify manually"
+        return self.desc
 
 
 @dataclass
@@ -94,12 +105,36 @@ def scan(host: str, ports: list[int] | None = None, timeout: float = 3.0) -> tup
             if b:
                 banners[port] = b
 
-    # Match signatures
+    # Match hardcoded signatures
     for port, banner in banners.items():
         for pattern, service, cve, severity, desc in SIGNATURES:
             if re.search(pattern, banner, re.IGNORECASE):
+                # Version-string match against the banner — presumptive by nature.
                 vulns.append(VulnResult(port=port, service=service, cve=cve,
-                                        severity=severity, desc=desc, banner=banner[:80]))
+                                        severity=severity, desc=desc, banner=banner[:80],
+                                        presumptive=True, confidence=60))
+
+    # Live CVE lookup for banners not matched by signatures
+    matched_ports = {v.port for v in vulns}
+    for port, banner in banners.items():
+        if port in matched_ports:
+            continue  # already have findings for this port
+        try:
+            from viper.core.cvedb import for_banner
+            live_cves = for_banner(banner)
+            for cve in live_cves[:3]:  # max 3 per port
+                vulns.append(VulnResult(
+                    port=port, service="",
+                    cve=cve.id,
+                    severity=cve.viper_severity,
+                    desc=cve.short_desc(80),
+                    banner=banner[:80],
+                    # Keyword/CPE match from NVD against the banner — weaker
+                    # still than a version-range signature.
+                    presumptive=True, confidence=50,
+                ))
+        except Exception:
+            pass  # CVE DB never blocks the scan
 
     # Check HTTP security headers
     http_ports = [p for p in port_list if p in (80, 443, 8080, 8443) and p in banners]

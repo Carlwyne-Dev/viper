@@ -45,40 +45,40 @@ TECH_SIGNATURES = [
     (r"woocommerce",                 "body",             "WooCommerce"),
 ]
 
+# (path, max_severity, description, content_fingerprint)
+# content_fingerprint: regex that must match body to confirm finding.
+# None = HTTP status alone is enough (lower confidence).
 SENSITIVE_PATHS = [
-    ("/.env",                 "CRIT", "Environment file — may contain secrets"),
-    ("/.git/config",          "CRIT", "Git config exposed"),
-    ("/.git/HEAD",            "CRIT", "Git repo exposed"),
-    ("/wp-login.php",         "HIGH", "WordPress login page"),
-    ("/wp-admin/",            "HIGH", "WordPress admin panel"),
-    ("/admin/",               "HIGH", "Admin panel"),
-    ("/administrator/",       "HIGH", "Admin panel (Joomla)"),
-    ("/phpmyadmin/",          "CRIT", "phpMyAdmin exposed"),
-    ("/backup/",              "HIGH", "Backup directory"),
-    ("/backup.zip",           "CRIT", "Backup archive exposed"),
-    ("/backup.sql",           "CRIT", "Database backup exposed"),
-    ("/config.php",           "CRIT", "Config file exposed"),
-    ("/config.yml",           "CRIT", "Config file exposed"),
-    ("/config.json",          "HIGH", "Config file exposed"),
-    ("/docker-compose.yml",   "CRIT", "Docker config exposed"),
-    ("/Dockerfile",           "HIGH", "Dockerfile exposed"),
-    ("/robots.txt",           "INFO", "robots.txt found"),
-    ("/sitemap.xml",          "INFO", "Sitemap found"),
-    ("/.htaccess",            "HIGH", ".htaccess exposed"),
-    ("/server-status",        "HIGH", "Apache server-status exposed"),
-    ("/api/",                 "INFO", "API endpoint"),
-    ("/api/v1/",              "INFO", "API v1 endpoint"),
-    ("/api/v2/",              "INFO", "API v2 endpoint"),
-    ("/swagger/",             "MED",  "Swagger UI exposed"),
-    ("/swagger.json",         "MED",  "Swagger spec exposed"),
-    ("/graphql",              "MED",  "GraphQL endpoint"),
-    ("/.well-known/",         "INFO", "Well-known directory"),
-    ("/crossdomain.xml",      "LOW",  "Flash crossdomain policy"),
-    ("/elmah.axd",            "HIGH", "ELMAH error log (ASP.NET)"),
-    ("/trace.axd",            "HIGH", "ASP.NET trace exposed"),
-    ("/actuator",             "HIGH", "Spring Boot actuator exposed"),
-    ("/actuator/env",         "CRIT", "Spring Boot env endpoint"),
-    ("/.DS_Store",            "MED",  ".DS_Store file exposed"),
+    ("/.env",               "HIGH", "Env file present",           r"[A-Z_]+=.+"),
+    ("/.git/HEAD",          "HIGH", "Git repo exposed",           r"ref: refs/heads/"),
+    ("/.git/config",        "HIGH", "Git config exposed",         r"\[core\]"),
+    ("/wp-login.php",       "MED",  "WordPress login",            r"wp-login|WordPress"),
+    ("/wp-admin/",          "MED",  "WordPress admin",            r"wp-admin|WordPress"),
+    ("/phpmyadmin/",        "MED",  "phpMyAdmin present",         r"phpMyAdmin|pma_"),
+    ("/admin/",             "MED",  "Admin panel present",        None),
+    ("/administrator/",     "MED",  "Admin panel present",        r"Joomla|Administrator"),
+    ("/backup/",            "MED",  "Backup directory",           r"Index of|backup"),
+    ("/backup.zip",         "HIGH", "Backup archive exposed",     None),
+    ("/backup.sql",         "HIGH", "Database backup exposed",    r"INSERT INTO|CREATE TABLE|mysqldump"),
+    ("/config.php",         "MED",  "Config file present",        r"\<\?php|define\("),
+    ("/config.yml",         "MED",  "Config file present",        r"password:|secret:|key:"),
+    ("/config.json",        "MED",  "Config file present",        r'"password"|"secret"|"key"'),
+    ("/docker-compose.yml", "MED",  "Docker config present",      r"version:|services:"),
+    ("/Dockerfile",         "LOW",  "Dockerfile present",         r"FROM |RUN |CMD "),
+    ("/robots.txt",         "INFO", "robots.txt found",           None),
+    ("/sitemap.xml",        "INFO", "Sitemap found",              None),
+    ("/.htaccess",          "MED",  ".htaccess present",          r"RewriteRule|Deny from|Options"),
+    ("/server-status",      "MED",  "Apache server-status",       r"Apache Server Status|requests currently"),
+    ("/swagger.json",       "MED",  "Swagger spec exposed",       r'"swagger"|"openapi"'),
+    ("/swagger/",           "LOW",  "Swagger UI present",         r"swagger-ui|Swagger UI"),
+    ("/graphql",            "LOW",  "GraphQL endpoint",           r"graphql|__schema"),
+    ("/actuator/env",       "HIGH", "Spring Boot env exposed",    r"activeProfiles|propertySources"),
+    ("/actuator",           "MED",  "Spring Boot actuator",       r"_links|health|info"),
+    ("/elmah.axd",          "MED",  "ELMAH error log",            r"Error Log|ELMAH"),
+    ("/.DS_Store",          "LOW",  ".DS_Store present",          None),
+    ("/api/v1/",            "INFO", "API v1 endpoint",            None),
+    ("/api/v2/",            "INFO", "API v2 endpoint",            None),
+    ("/.well-known/",       "INFO", "Well-known directory",       None),
 ]
 
 SECURITY_HEADERS = {
@@ -163,14 +163,46 @@ def _fetch(url: str, timeout: float = 6.0, follow: bool = True) -> tuple[int, di
         return 0, {}, "", url
 
 
-def _probe_path(base: str, path: str, sev: str, desc: str, timeout: float) -> PathResult | None:
+def _probe_path(base: str, path: str, max_sev: str, desc: str, timeout: float,
+                fingerprint: str = None) -> PathResult | None:
+    """
+    Probe a path. Only flag if:
+    - HTTP 200 AND content fingerprint matches (if fingerprint provided)
+    - HTTP 200 AND no fingerprint (lower confidence — noted in desc)
+    - HTTP 403 = path exists but blocked (LOW, informational only)
+    Never report a finding based on HTTP 200 alone for high-severity paths.
+    """
+    import re as _re
     url = base.rstrip("/") + path
     status, hdrs, body, _ = _fetch(url, timeout=timeout, follow=False)
-    if status in (200, 301, 302, 403):
+
+    if status == 200:
         size = len(body)
-        # 403 on sensitive paths is still a finding
-        real_sev = sev if status == 200 else ("LOW" if status == 403 else sev)
-        return PathResult(path=path, status=status, severity=real_sev, desc=desc, size=size)
+        if fingerprint:
+            # Content verification — only flag if body matches
+            if _re.search(fingerprint, body, _re.IGNORECASE):
+                return PathResult(path=path, status=status,
+                                  severity=max_sev, desc=desc + " (content verified)", size=size)
+            else:
+                # HTTP 200 but content doesn't match — could be WAF/redirect/fake
+                # Downgrade to INFO
+                return PathResult(path=path, status=status,
+                                  severity="INFO",
+                                  desc=desc + " (HTTP 200, content unverified — manual check recommended)",
+                                  size=size)
+        else:
+            # No fingerprint — report but at reduced severity
+            sev = max_sev if max_sev in ("INFO", "LOW") else "LOW"
+            return PathResult(path=path, status=status,
+                              severity=sev,
+                              desc=desc + " (HTTP 200, manual verification recommended)",
+                              size=size)
+
+    elif status == 403:
+        # Exists but access denied — always LOW, informational
+        return PathResult(path=path, status=status, severity="LOW",
+                          desc=desc + " (HTTP 403 — access denied, path exists)", size=0)
+
     return None
 
 
@@ -298,8 +330,8 @@ def scan(
         paths_to_check = SENSITIVE_PATHS[:max_paths]
         with concurrent.futures.ThreadPoolExecutor(max_workers=20) as ex:
             futures = {
-                ex.submit(_probe_path, base_url, path, sev, desc, timeout): path
-                for path, sev, desc in paths_to_check
+                ex.submit(_probe_path, base_url, path, sev, desc, timeout, fp): path
+                for path, sev, desc, fp in paths_to_check
             }
             for f in concurrent.futures.as_completed(futures):
                 hit = f.result()

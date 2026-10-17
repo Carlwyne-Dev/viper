@@ -3,7 +3,7 @@ from viper.output import terminal as out
 
 
 @click.group(context_settings={"help_option_names": ["-h", "--help"]})
-@click.version_option(version="0.3.0", prog_name="viper")
+@click.version_option(version="1.0.0", prog_name="viper")
 def cli():
     """
     \b
@@ -13,7 +13,7 @@ def cli():
     ╚██╗ ██╔╝██║██╔═══╝ ██╔══╝  ██╔══██╗
      ╚████╔╝ ██║██║     ███████╗██║  ██║
       ╚═══╝  ╚═╝╚═╝     ╚══════╝╚═╝  ╚═╝
-             we bite.  v0.3.0
+             we bite.  v1.0.0
 
     \b
     FANGS
@@ -844,3 +844,100 @@ def targets():
     out.blank()
     out.summary(len(all_t), "targets on record", 0.0)
     out.blank()
+
+
+# ── viper cve ─────────────────────────────────────────────────────────────────
+
+@cli.command()
+@click.argument("query")
+@click.option("--id",    "by_id",  is_flag=True, default=False, help="Look up a specific CVE ID.")
+@click.option("--limit", "-n",     default=10,   show_default=True, help="Max results.")
+@click.option("--fresh", is_flag=True, default=False, help="Force refresh from NVD (skip cache).")
+@click.option("--json",  "json_mode", is_flag=True, default=False, help="Output as JSON.")
+def cve(query, by_id, limit, fresh, json_mode):
+    """Search the NVD CVE database.
+
+    \b
+    Results are cached for 24h at ~/.viper/cvedb/.
+    Uses the NVD public API — no API key required.
+
+    \b
+    Examples:
+      viper cve nginx
+      viper cve "apache 2.4"
+      viper cve CVE-2021-41773 --id
+      viper cve openssh --limit 5
+      viper cve nginx --fresh
+    """
+    import json as jsonlib
+    from viper.core.cvedb import search, by_id as fetch_by_id, cache_stats
+
+    if json_mode:
+        from viper.core import jsonout
+        jsonout.enable()
+        out.set_silent(True)
+
+    out.rule("CVE DATABASE", query)
+    out.blank()
+
+    stats = cache_stats()
+    if stats["total_cves"] > 0:
+        out.tag("info", f"Cache: [dim]{stats['total_cves']} CVEs  ·  {stats['files']} queries  ·  oldest {stats['oldest_hrs']}h[/dim]")
+        out.blank()
+
+    with out.Timer() as t:
+        with out.console.status("  [dim]querying NVD...[/dim]", spinner="dots"):
+            if by_id:
+                result = fetch_by_id(query)
+                cves = [result] if result else []
+            else:
+                cves = search(query, max_results=limit, force_refresh=fresh)
+
+    if not cves:
+        out.tag("info", f"No CVEs found for: [white]{query}[/white]")
+        out.blank()
+        return
+
+    sev_color = {"CRIT": "crit", "HIGH": "high", "MED": "med", "LOW": "low", "INFO": "dim"}
+
+    for c in cves:
+        sc = sev_color.get(c.viper_severity, "dim")
+        out.console.print(
+            f"  [{sc}]{c.viper_severity:<5}[/{sc}]  "
+            f"[bold white]{c.id}[/bold white]  "
+            f"[dim]CVSS {c.cvss_score:.1f}[/dim]"
+        )
+        out.console.print(f"  [dim]       {c.short_desc(90)}[/dim]")
+        if c.published:
+            out.console.print(f"  [dim]       published {c.published}[/dim]")
+        out.blank()
+
+    out.summary(len(cves), "CVEs found", t.seconds)
+    out.blank()
+
+    if json_mode:
+        from viper.core import jsonout
+        jsonout.merge({"query": query, "cves": [c.__dict__ for c in cves]})
+        jsonout.flush()
+
+
+# ── viper tui ─────────────────────────────────────────────────────────────────
+
+@cli.command()
+def tui():
+    """Launch the interactive TUI dashboard.
+
+    \b
+    Full interactive interface — scan, history, diff, CVE search, crack.
+    Keyboard shortcuts: [1-5] switch tabs  [Q] quit
+
+    \b
+    Example:
+      viper tui
+    """
+    try:
+        from viper.tui.app import run
+        run()
+    except ImportError:
+        out.error("textual not installed.")
+        out.tip("pip install textual>=0.50.0")
